@@ -1,0 +1,42 @@
+# Secrets — must NEVER end up in image layers
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Local state
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Dev artifacts
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+node_modules/
+dist/
+build/
+coverage/
+.turbo/
+.next/
+
+# Docs (not needed in runtime image; reduce attack surface and image size)
+docs/
+*.md
+!README.md
+
+# CI / hooks (not needed in runtime)
+.husky/
+lefthook.yml
+scripts/grep-*.sh
+
+# OS / editor cruft
+.DS_Store
+*.log
+*.swp

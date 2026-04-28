@@ -10,7 +10,7 @@ for gate in \
   scripts/grep-no-naked-eq-in-auth.sh \
   scripts/grep-uses-timingsafeequal.sh \
   scripts/grep-no-accepted-key.sh \
-  scripts/grep-no-token-logged.sh
+  scripts/grep-no-secrets-logged.sh
 do
   if [ -x "$gate" ]; then
     echo "→ $gate"

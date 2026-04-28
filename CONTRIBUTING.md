@@ -18,11 +18,14 @@ pnpm grep:all     # security/style grep gates
 We use [lefthook](https://github.com/evilmartians/lefthook):
 
 ```bash
-brew install lefthook   # or your equivalent
+brew install lefthook   # macOS — see lefthook docs for Linux/Windows
 lefthook install
 ```
 
-Pre-commit runs typecheck, lint --fix on staged, prettier on staged, and grep gates. Pre-push runs full test + grep:all. None of these are skippable; if a hook fails, the commit / push is blocked. **Do not use `--no-verify`** — fix the issue.
+- **Pre-commit:** lint --fix on staged, prettier on staged, all grep gates (full-tree, fast).
+- **Pre-push:** typecheck (full project), full test suite (skipped on docs-only pushes), grep gates again.
+
+None of these are skippable; if a hook fails, the commit / push is blocked. **Do not use `--no-verify`** — fix the issue.
 
 ## Process
 
@@ -34,7 +37,7 @@ Pre-commit runs typecheck, lint --fix on staged, prettier on staged, and grep ga
 6. **Tests next** — derived from the issue's "Verification" section. Commit. Tests should fail.
 7. **Implement** until tests pass. Multiple small commits preferred.
 8. Run `pnpm typecheck && pnpm lint && pnpm test && pnpm grep:all` locally. Fix anything red.
-9. Open a PR with `Closes #<issue-num>` in the body. Title format: `[<role>] <issue title>` (e.g., `[feat] M5: Atomic claim pickup`).
+9. Open a PR with `Closes #<issue-num>` in the body. Title format: `<type>(<scope>): <issue title>` where `<type>` ∈ `{feat, fix, refactor, docs, test, chore, build, ci, perf}` from the issue's `type:*` label and `<scope>` is the area (`murmur`, `jobseek`, `auth`, `claim`, `dispatch`, …). Example: `feat(claim): atomic claim pickup with CAS submit`.
 10. Comment on the issue: `Implementation complete, PR #<n>, ready for review`.
 11. A reviewer (agent or human) will leave comments. Address them; reply `Fixed in <sha>` and resolve threads. Push again.
 12. When approved: orchestrator (or a human maintainer) squash-merges.

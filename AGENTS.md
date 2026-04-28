@@ -14,18 +14,18 @@ Role definitions: `.claude/agents/orchestrator.md`, `.claude/agents/developer.md
 
 ## The development process (per issue)
 
-1. **Claim** — developer adds a comment to the issue: `Claimed by <handle> until <ISO timestamp +2h>`. If a claim's TTL elapses without a PR, the next orchestrator cycle treats the issue as unclaimed.
-2. **Implementation sketch** — developer adds a second comment to the issue: a 1-paragraph approach + bullet list of files to add/edit + key types/interfaces + identified risks. Posted *before* code is written, so the orchestrator can intervene if the sketch is off.
-3. **Branch** — developer creates `<role>/<issue-number>-<short-slug>` branch off `main`.
+1. **Claim** — developer adds a comment to the issue: `Claimed by <handle> until <ISO timestamp +2h>`. If a claim's TTL elapses without a PR, the next orchestrator cycle treats the issue as unclaimed and a sweeper deletes any orphaned `dev/<issue-num>-*` branches (`scripts/sweep-claims.sh`).
+2. **Implementation sketch** — developer adds a second comment to the issue: a 1-paragraph approach + bullet list of files to add/edit + key types/interfaces + identified risks. Posted *before* code is written. Developer does NOT wait for orchestrator approval; the orchestrator reviews on its next loop iteration and re-spawns with corrections if the approach is wrong.
+3. **Branch** — developer creates a branch off `main`. Branch name: `dev/<issue-number>-<short-slug>` (e.g., `dev/10-atomic-claim`). Single `dev/` prefix used regardless of role.
 4. **Interfaces first** — developer writes the type signatures / abstract classes / function signatures with no implementation (throw `not implemented` body). JSDoc/docstrings explain contract.
 5. **Tests against interfaces** — developer writes the verification tests from the issue's "Verification" section against the unimplemented interfaces. All tests should fail at this stage. This is a checkpoint: the test list captures every edge case the issue named.
 6. **Implementation** — developer fills in the bodies until tests pass.
 7. **Local quality gates** — developer runs `pnpm typecheck && pnpm lint && pnpm test && pnpm grep:all` (per the M1 setup) and confirms green.
-8. **PR** — developer opens a PR with `Closes #<issue-number>` in the body. PR title is `[<role>] <issue title>`. PR description includes: links to issue, files changed summary, manual verification steps run.
+8. **PR** — developer opens a PR with `Closes <repo>#<issue-number>` in the body. PR title format: `<type>(<scope>): <issue title>` where `<type>` ∈ `{feat, fix, refactor, docs, test, chore, build, ci, perf}` derived from the issue's `type:*` label, and `<scope>` is the area (`murmur`, `jobseek`, `auth`, `claim`, `dispatch`, etc.). Example: `feat(claim): atomic claim pickup with CAS submit`. PR description includes: links to issue, files changed summary, manual verification steps run.
 9. **Hand-off** — developer comments on the issue: `Implementation complete, PR #<n>, ready for review`. Stops working.
-10. **Review** — orchestrator spawns a reviewer on the PR. Reviewer leaves PR comments and a final `APPROVE` or `REQUEST CHANGES` summary. Findings unrelated to this PR become new GH issues.
-11. **Iterate** — if `REQUEST CHANGES`, orchestrator re-spawns the developer to address feedback. The developer responds to each comment thread with either a code change or a justification (the reviewer must explicitly resolve threads they accept).
-12. **Merge** — once `APPROVE` is final, orchestrator merges (squash-merge, conventional commit message, branch deleted).
+10. **Review** — orchestrator spawns a reviewer on the PR. Reviewer leaves PR comments and a final `APPROVE` or `REQUEST CHANGES` summary. **All review chatter goes on the PR, not the issue** (keeps the issue activity feed readable). Findings unrelated to this PR become new GH issues, filed under the appropriate `area:*` `type:*` labels.
+11. **Iterate** — if `REQUEST CHANGES`, orchestrator re-spawns the developer to address feedback. The developer responds to each comment thread with either a code change or a justification (the reviewer must explicitly resolve threads they accept). After 3 review cycles on the same PR with no convergence, the orchestrator escalates to a human via `[orchestrator-blocker]` issue.
+12. **Merge** — once `APPROVE` is final, orchestrator squash-merges using the merge protocol in `.claude/agents/orchestrator.md`. Squash-commit subject is `<type>(<scope>): <issue title>`; body summarizes the change in 1-2 paragraphs and includes `Closes <repo>#<n>`. Branch deleted on merge.
 
 ## Quality gates (must pass before merge)
 
@@ -59,16 +59,7 @@ Role definitions: `.claude/agents/orchestrator.md`, `.claude/agents/developer.md
 - Squash merge only
 - (Optional, post-bootstrap) 1 reviewer approval — note that GitHub forbids self-review, so if the orchestrator opens the PR under the same identity, branch protection with required reviews will block its own merges. Either configure with `required_approving_review_count: 0` and rely on CI + reviewer-agent comments, or use a separate bot identity for the orchestrator.
 
-Apply with:
-
-```bash
-gh api -X PUT repos/colophon-group/murmur/branches/main/protection \
-  -f required_status_checks.strict=true \
-  -f 'required_status_checks.contexts[]=quality' \
-  -F enforce_admins=true \
-  -F required_pull_request_reviews.required_approving_review_count=0 \
-  -F restrictions=
-```
+Apply via the bootstrap script: `bash scripts/bootstrap-branch-protection.sh colophon-group/murmur`. The script POSTs the modern `checks[]` form (the older `contexts[]` is deprecated), enforces `enforce_admins=true`, requires linear history, and sets `restrictions: null` correctly (the field requires JSON null, which `gh api -F` cannot send). Re-running is idempotent.
 
 ## One-time agent bootstrap (per developer machine)
 

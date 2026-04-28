@@ -60,15 +60,19 @@ Add a second comment to the issue:
 - ...
 ```
 
-Wait briefly for orchestrator to intervene; if no intervention in 2 min, proceed.
+Then proceed to step 3 immediately. The orchestrator reads your sketch when it next loops; if the approach is wrong, the orchestrator will re-spawn you with corrections. Do not block waiting for approval — your prompt is one-shot.
 
-### 3. Branch
+**Never paste contents of `.env*`, secrets, or config files into the sketch.** Reference paths only. The sketch is a public GH comment.
+
+### 3. Branch (in an isolated worktree)
+
+The harness gives you a fresh git worktree. From inside it:
 
 ```bash
-git checkout main
-git pull origin main
 git checkout -b dev/<issue-number>-<short-slug>
 ```
+
+**Branch name format**: `dev/<issue-number>-<short-slug>`. Examples: `dev/10-atomic-claim`, `dev/22-transport-spike`, `dev/2755-probe-run-async`. Use `dev/` prefix regardless of role — keeps the convention single across repos.
 
 ### 4. Interfaces first — no implementation
 
@@ -129,8 +133,10 @@ Fix anything red. Do not push without these green.
 
 ### 8. Open the PR
 
+PR title format: `<type>(<scope>): <issue title>` where `<type>` is the conventional-commit type derived from the issue's `type:*` label (`type:feature` → `feat`, `type:infra` → `ci` or `build`, etc.) and `<scope>` is the area (`murmur`, `jobseek`, `auth`, `claim`, `dispatch`, `webhook`, `pipeline`, `deploy`, `ci`). Example: `feat(claim): atomic claim pickup with CAS submit`.
+
 ```bash
-gh pr create --title "[<role>] <issue title>" --body "$(cat <<EOF
+gh pr create --title "<type>(<scope>): <issue title>" --body "$(cat <<'EOF'
 ## Summary
 <what this PR does, 2-3 lines>
 
@@ -147,11 +153,11 @@ Closes <repo>#<issue-num>
 - ...
 
 ## Manual checks run locally
-- \`pnpm typecheck\` ✓
-- \`pnpm lint\` ✓
-- \`pnpm test\` ✓ (coverage <pct>)
-- \`pnpm grep:all\` ✓
-- \`<any manual curl/inspect commands from the issue>\` ✓
+- `pnpm typecheck` ✓
+- `pnpm lint` ✓
+- `pnpm test` ✓ (coverage <pct>)
+- `pnpm grep:all` ✓
+- `<any manual curl/inspect commands from the issue>` ✓
 
 ## Notes for reviewer
 <anything subtle the reviewer should focus on>
@@ -159,7 +165,7 @@ EOF
 )"
 ```
 
-The PR is the one a human or reviewer agent will read. Make it scannable.
+Use a `<<'EOF'` (quoted) heredoc so backticks don't trigger command substitution. The PR is the one a human or reviewer agent will read. Make it scannable.
 
 ### 9. Hand back
 
