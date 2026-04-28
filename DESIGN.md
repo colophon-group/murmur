@@ -3,7 +3,7 @@
 **Status:** Draft, MVP for theory-validation demo
 **Date:** 2026-04-28
 
-Murmur is the **infrastructure layer between publisher apps and user agents** — between apps that need decision work done, and the coding agents (Claude Code, Cursor, …) already running in users' IDEs. Publishers expose pipelines of small decision subtasks; user agents in their owners' environments pull a subtask, complete it in-session, and submit a structured result. Murmur does not invent agent cognition — it routes existing cognition to where it's useful and stitches results back to the publisher. The first publisher and demo target is jobseek (intentionally a simple first case); the protocol is publisher-agnostic by design.
+Murmur is the **infrastructure layer between publisher apps and user agents** — between apps that need decision work done, and the coding agents (Claude Code, Cursor, …) already running in users' IDEs. Publishers expose pipelines of small decision subtasks; user agents in their owners' environments pull a subtask, complete it in-session, and submit a structured result. Murmur does not invent agent cognition — it orchestrates existing cognition (claims, schemas, dynamic per-board fan-out, conditional skip, lifecycle hooks) and stitches results back to the publisher. The protocol is closer to a typed, claim-based workflow runtime than a thin router — the §3.1 primitives (`spawns`, `skip_if`, claim TTL, schema-snapshot, audit log) reflect that. The first publisher and demo target is jobseek (intentionally a simple first case); the protocol is publisher-agnostic by design.
 
 ---
 
@@ -50,11 +50,13 @@ A scripted ~3-minute run executed live.
 1. Show the empty directory and the one-line MCP entry in `~/.claude/mcp.json` pointing at Murmur's public URL. (Bearer token in the entry; not on the slide.)
 2. **Audience picks one of 3 pre-validated companies on the slide.** Operator triggers a jobseek run with that input.
 3. Prompt Claude Code: *"Pull a Murmur task and complete it. Repeat until no more tasks."*
-4. Agent calls `pull_task` → receives jobseek's `find-board`. Uses built-in web fetch, identifies the board URL and provider, calls `submit_result`.
-5. Agent calls `pull_task` → receives `configure-monitor`. Reads `instructions` telling it to use `task_tool("test monitor", {...})` to verify before submitting.
-6. Agent picks a candidate config, calls `task_tool("test monitor", {...})` — Murmur proxies to jobseek's probe endpoint, returns posting count + samples. Agent confirms `ok: true`, calls `submit_result`.
-7. Same loop for `configure-scraper` with `task_tool("test scraper", {...})`.
-8. Switch to jobseek view: `final_output` arrives via webhook, accept handler re-runs the same probe logic in-process, writes the audience-chosen company to jobseek's catalog. Visible on screen.
+4. Agent calls `pull_task` → receives `pre-verify`. Confirms via `task_tool('search companies', ...)` and submits.
+5. Agent calls `pull_task` → receives `list-boards`. Uses built-in web fetch (and `task_tool('analyze hreflang', ...)` if needed) to find the board URL(s); submits.
+6. Agent calls `pull_task` → receives `configure-board` (one instance per board the agent listed). Reads `instructions` telling it to use `task_tool('probe monitor', ...)`, then `select monitor`, `run monitor`, `feedback`, etc.
+7. Agent iterates on probes/runs, then calls `submit_result` with `monitor_type`/`monitor_config`/`scraper_*`/`verdict`/`per_field`. (For the demo company we pick a single-board greenhouse target so this completes in one configure-board pass.)
+8. Switch to jobseek view: `final_output` arrives via webhook, accept handler re-runs the same probe logic in-process, writes the audience-chosen company to jobseek's catalog (Postgres). Visible on screen.
+
+For the demo we deliberately use the demo-minimum subset (§5.1): the chosen company has one board, no `setup-metadata` rich fields, no KB authoring. The full §3.1 pipeline shape applies to non-demo runs.
 
 **Landing line:** *"That agent had never seen jobseek. Audience-chosen input. The protocol carried what jobseek decided to put in it — Murmur's job is to route, not to know."*
 
@@ -70,7 +72,7 @@ Two surfaces: an HTTP API for publishers, an MCP server for agents. Both are thi
 - **Subtask def** — one entry in a pipeline's `subtasks:` list. Authoring-time concept.
 - **Run** — one execution of a pipeline, triggered by the publisher with an `initial_input`. Pinned to the pipeline version at start.
 - **Subtask instance** — the runtime occurrence of a subtask def within a run. The thing agents claim.
-- **Claim** — a time-limited lease on a specific subtask instance, identified by `claim_token`. Issued by `pull_task`, consumed by `submit_result`. Bound to the token, not to the agent's MCP session.
+- **Claim** — a time-limited lease on a specific subtask instance, identified by `claim_token`. Issued by `pull_task`, consumed by `submit_result`. Bound to the token, not to the agent's MCP session. Throughout the doc, the agent-facing argument is named `claim` and its value is the `claim_token`; "claim" and "claim_token" refer to the same thing.
 - **Subcommand** — a publisher-declared callable under a subtask def, invoked by the agent through `task_tool('<name>', {...})`.
 - **Publisher** — an app that registers pipelines and accepts `final_output` via webhook.
 - **Agent** — a coding agent (Claude Code, Cursor, …) running in a user's environment, connected to Murmur over MCP.
@@ -82,111 +84,235 @@ YAML, authored by the publisher, registered to the server.
 
 ```yaml
 id: jobseek/add-company
-version: 1
+webhook: https://jobseek.colophon-group.org/api/murmur/accept
 initial_input_schema:
   company_name: string
   website: string
 subtasks:
-  - id: find-board
+  - id: pre-verify
     instructions: |
-      Given the company website, find the URL of its public job board
-      and identify the provider.
-      Allowed providers: greenhouse, lever, workday, ashby, smartrecruiters, ...
-    inputs: [init.website]
+      Confirm this is a real, non-duplicate company with a careers page.
+      Use task_tool('search companies', {q: ...}) to check duplicates;
+      task_tool('verify company', {website: ...}) to confirm it exists.
+      If reject: set verified=false and pick a reject_reason.
+    inputs: [init.company_name, init.website]
     outputs:
-      board_url: string
-      board_provider: enum
-  - id: configure-monitor
-    instructions: |
-      Given the board URL and provider, choose the monitor type and config
-      jobseek should use to detect new postings. Use
-      task_tool("test monitor", {...}) to verify your candidate before
-      submitting; task_tool("help") lists everything available for this task.
-    inputs: [find-board.board_url, find-board.board_provider]
-    outputs:
-      monitor_type: enum
-      monitor_config: object
+      verified: boolean
+      canonical_name: string
+      canonical_website: string
+      reject_reason: enum [duplicate, not-a-company, company-not-found, no-job-board, no-open-positions, subsidiary]?
+      reject_message: string?
+      parent_slug: string?    # set when reject_reason=subsidiary
+      kb_entries: array?      # optional learnings from this step
+      case_studies: array?
     subcommands:
-      - name: test monitor
-        help: Try a candidate monitor config against the live board. Returns posting count and samples.
-        input_schema:  { board_url: string, monitor_type: enum, monitor_config: object }
-        output_schema: { ok: boolean, postings_seen: integer, sample_postings: array, errors: array }
-        endpoint: POST https://jobseek.colophon-group.org/api/murmur/probes/monitor
-  - id: configure-scraper
+      - name: search companies
+        endpoint: POST https://jobseek.colophon-group.org/api/murmur/companies/search
+        input_schema:  { q: string }
+        output_schema: { matches: array }
+      - name: verify company
+        endpoint: POST https://jobseek.colophon-group.org/api/murmur/companies/verify
+        input_schema:  { website: string }
+        output_schema: { exists: boolean, careers_page: string, errors: array }
+
+  - id: setup-metadata
+    skip_if: { "!": [{ "var": "pre-verify.verified" }] }   # short-circuits list-boards and configure-board
     instructions: |
-      Given the board URL and monitor, choose the scraper type and config
-      to extract individual postings. Use task_tool("test scraper", {...})
-      to verify against a sample posting before submitting.
-    inputs: [find-board.board_url, configure-monitor.monitor_type]
+      Pick logos, write descriptions in en/de/fr/it, set industry, founded
+      year, employee count range. Use task_tool('discover company', ...)
+      to kick off auto-discovery; task_tool('list logo candidates') to
+      review; task_tool('taxonomy search', ...) for industry IDs.
+    inputs: [pre-verify.canonical_name, pre-verify.canonical_website]
     outputs:
-      scraper_type: enum
-      scraper_config: object
+      logo_url: string
+      icon_url: string
+      logo_type: enum
+      descriptions: { en: string, de: string, fr: string, it: string }
+      industry_id: string
+      employee_count_range: integer
+      founded_year: integer
+      kb_entries: array?
+      case_studies: array?
     subcommands:
-      - name: test scraper
-        help: Try a candidate scraper config against a sample posting from the board.
-        input_schema:  { board_url: string, scraper_type: enum, scraper_config: object, sample_url: string }
-        output_schema: { ok: boolean, parsed_posting: object, errors: array }
-        endpoint: POST https://jobseek.colophon-group.org/api/murmur/probes/scraper
+      - name: discover company
+        endpoint: POST https://jobseek.colophon-group.org/api/murmur/discover
+      - name: list logo candidates
+        endpoint: POST https://jobseek.colophon-group.org/api/murmur/discover/logos
+      - name: taxonomy search
+        endpoint: POST https://jobseek.colophon-group.org/api/murmur/taxonomy/search
+
+  - id: list-boards
+    skip_if: { "!": [{ "var": "pre-verify.verified" }] }
+    instructions: |
+      Discover all distinct boards (hreflang variants, regional/functional
+      splits). Use task_tool('analyze hreflang', ...) for variants and
+      task_tool('infer link pattern', ...) when needed. Capture provider
+      hints, hreflang lang/region, and traversal source so configure-board
+      can reuse them. Cross-board reconciliation (mirrors, subsets) runs
+      in the accept handler — don't try to dedupe yourself.
+
+      Consolidate parametrized variants of the SAME ATS instance into ONE
+      entry. E.g., Accenture's 12 country/language pages on www.accenture.com
+      are one Accenture monitor with a parametrization list, not 12 boards.
+      Same for Oracle HCM sites under one tenant.
+    inputs: [pre-verify.canonical_website]
+    outputs:
+      boards:
+        type: array
+        items:
+          alias: string
+          url: string
+          provider_hint: enum?        # greenhouse|lever|workday|...
+          hreflang_lang: string?
+          hreflang_region: string?
+          source: enum?               # careers-page | hreflang | manual | parent-portal
+          job_link_pattern: string?
+      kb_entries: array?
+      case_studies: array?
+    spawns:
+      for_each: boards
+      template: configure-board
+      bind_as: board                  # spawned subtask sees `board` in its inputs
+    subcommands:
+      - name: analyze hreflang
+        endpoint: POST https://jobseek.colophon-group.org/api/murmur/boards/hreflang
+      - name: infer link pattern
+        endpoint: POST https://jobseek.colophon-group.org/api/murmur/boards/infer-pattern
+
+  - id: configure-board    # template; instantiated per board by list-boards.spawns
+    instructions: |
+      Configure monitor and (when needed) scraper for this board, OR mark
+      the board as not-real / redundant / parent-portal so the accept handler
+      can drop it. The `outcome` field is the routing decision.
+
+      Standard procedure (outcome=configured):
+        1. task_tool('probe monitor', { board_url, expected_count }) — review
+           the cost-ranked list of monitor types it returns.
+        2. Pick a candidate type. task_tool('select monitor',
+           { type, name: 'cfg-1', config: {...} }).
+        3. task_tool('run monitor', { config: 'cfg-1' }) — verify the count
+           is close to expected and samples look right.
+        4. If the count is wrong, FIRST try iterating config (filters,
+           pagination, url_transform) under a new name 'cfg-2'. Only switch
+           monitor type after config iteration fails.
+        5. Once monitor is good: if it's an auto-configuring type
+           (greenhouse, lever, ashby, rss), skip to step 7. Otherwise
+           task_tool('probe scraper'), then 'select scraper', then
+           'run scraper'. Iterate config the same way.
+        6. task_tool('feedback', { verdict, per_field: {...} }).
+        7. submit_result with outcome='configured' and the populated
+           monitor/scraper fields.
+
+      Non-standard outcomes (skip steps 1-7 and submit immediately):
+        - outcome='phantom' — probes confirm the URL exists but has no real
+          listings (not a temporary 0; structurally empty: 404, login wall,
+          parked domain). Set phantom_evidence with what you saw.
+        - outcome='parent-portal' — careers page redirects to a parent
+          company's portal (SWISS → Lufthansa Group, Fiat → Stellantis).
+          Set parent_company_hint. Accept handler drops this board and
+          may queue a fresh run for the parent.
+        - outcome='unsupported' — board exists with real jobs but no
+          monitor type extracts them well (e.g., custom JS app no probe
+          handles). Set evidence; accept handler may file a follow-up.
+
+      task_tool('help <name>') for schema details. task_tool('kb search', { q })
+      if you hit something unfamiliar.
+    inputs: [board]
+    outputs:
+      outcome: enum [configured, phantom, parent-portal, unsupported]
+      # Populated only when outcome=configured:
+      monitor_type: enum?
+      monitor_config: object?
+      scraper_type: enum?       # nullable when monitor auto-configures
+      scraper_config: object?
+      verdict: enum [good, acceptable, bad]?
+      per_field: object?        # title=excellent|good|... etc.
+      # Populated for non-configured outcomes:
+      phantom_evidence: string?       # outcome=phantom
+      parent_company_hint: string?    # outcome=parent-portal (slug or URL)
+      unsupported_reason: string?     # outcome=unsupported
+      # Optional learnings captured at this step:
+      kb_entries: array?
+      case_studies: array?
+    subcommands:
+      - { name: probe monitor,   endpoint: POST .../probes/monitor-all }
+      - { name: select monitor,  endpoint: POST .../select/monitor }
+      - { name: run monitor,     endpoint: POST .../run/monitor }
+      - { name: probe scraper,   endpoint: POST .../probes/scraper-all }
+      - { name: select scraper,  endpoint: POST .../select/scraper }
+      - { name: run scraper,     endpoint: POST .../run/scraper }
+      - { name: probe deep,      endpoint: POST .../probes/deep }
+      - { name: probe api,       endpoint: POST .../probes/api }
+      - { name: feedback,        endpoint: POST .../feedback }
+      - { name: reject-config,   endpoint: POST .../select/reject }
+
 final_output:
-  composes: [find-board.*, configure-monitor.*, configure-scraper.*]
+  composes:
+    - pre-verify.canonical_*
+    - setup-metadata.*
+    - boards: list-boards.boards × configure-board.*
+    - kb_entries: flatten([pre-verify, setup-metadata, list-boards, configure-board].kb_entries)
+    - case_studies: flatten([pre-verify, setup-metadata, list-boards, configure-board].case_studies)
   webhook: https://jobseek.colophon-group.org/api/murmur/accept
 ```
 
-Subtasks are linear and pure decisions: `instructions + input → output`. No side effects on Murmur's side, no filesystem, no built-in app-specific tools. When a subtask benefits from verification, the publisher declares **subcommands** under that subtask — each with a name, JSON Schemas for input and output, optional help text, and a publisher HTTP `endpoint`. Agents invoke them through `task_tool` (see §3.4 for dispatch semantics). The publisher only writes HTTP endpoints; the MCP surface stays static.
+This pipeline def — pipeline shape only, schemas truncated for readability — covers ws's full workflow. The full mapping is in §9. Each subtask explicitly declares its own `kb_entries` and `case_studies` optional outputs; the publisher's `composes` rule flattens them into `final_output`. Murmur has no special "universal field" — the publisher decides which subtasks may author KB content.
+
+Subtasks are pure decisions: `instructions + input → output`. No side effects on Murmur's side, no filesystem, no built-in app-specific tools. When a subtask benefits from verification, the publisher declares **subcommands** under that subtask (see §3.4 for dispatch semantics).
+
+**Schema fields beyond the basic example.** The pipeline-def schema also supports the following, used to host non-trivial workflows like jobseek's `ws`:
+
+- `skip_if` — JSONLogic-style expression on prior outputs. If true, the subtask is auto-completed with an empty output and the run advances. Used for conditional steps (e.g., "skip downstream subtasks when `pre-verify.verified` is false").
+- `spawns` — declares that this subtask's output triggers dynamic instantiation of one child subtask per item in a named list field. Example: a `list-boards` subtask returning `{boards: [...]}` with `spawns: { for_each: boards, template: configure-board }` causes Murmur to instantiate one `configure-board` subtask per discovered board, in order. Replaces the "fixed subtask list" assumption when N is discovered at runtime.
+- `requires` — IDs of subtasks whose outputs are inputs. Replaces the implicit "next in list" ordering. Murmur uses `requires` to compute the ready set; siblings without ordering constraints are eligible to be claimed concurrently (post-MVP — see §5).
+- `notes` parameter on `submit_result` — agents may pass an optional free-text `notes` arg alongside the structured `result`. Persisted in the audit log; not part of the schema-validated output. Hosts ws's reflection-per-step concept without colliding with publisher schemas that legitimately use field names like `notes` or `_notes`.
 
 ### 3.2 Server endpoints (publisher-facing)
 
 - `POST /pipelines` — register/upsert a pipeline def. Returns `{id, version}`.
-- `POST /pipelines/{id}/runs` — start a run with `initial_input`. Returns `{run_id}`.
-- `GET /runs/{run_id}` — poll status and final output.
-- `POST {webhook}` — server pushes `final_output` to the publisher when the run completes.
+- `POST /pipelines/{id}/runs` — start a run. Body: `{initial_input, prior_outputs?: {<subtask_id_or_path>: <output>}}`. `prior_outputs` pre-fills subtask outputs at run-start; those subtasks are skipped. Used for ws-style **reconfig** runs (start a new run from an existing company's prior data, then redo only the subtasks the operator wants redone). Validation runs at registration: pre-filled outputs must satisfy the subtask's `output_schema`; malformed runs are rejected with 4xx. Interaction with `spawns`: pre-filling a `spawns` parent (e.g., `list-boards.boards: [...]`) **does** trigger the spawn — children are instantiated as if the parent had submitted normally. To pre-fill specific spawned children, address by composite path: `"configure-board[alias=careers-de]": { ... }` — Murmur skips that child when it would otherwise be claimed. Children without `prior_outputs` claims run normally; this is how "redo only the German board" works. Returns `{run_id}`.
+- `GET /runs/{run_id}` — poll status, final output, and (for the publisher) the run-level audit log: ordered list of `{subtask_id, claim, started_at, submitted_at, output, notes, agent_actions: [...]}`. Used for ws's trace-export.
+- `POST {webhook}` — server pushes `final_output` to the publisher when the run completes (bearer-authed, idempotent on `run_id` — see §3.6).
 
 ### 3.3 Server endpoints (agent-facing, behind MCP)
 
 - `GET /work/next` — atomically claim the oldest unclaimed subtask instance across all pipelines, or 204. Implementation: single statement `UPDATE subtask_instances SET claim_token=?, expires_at=? WHERE id=(SELECT id FROM subtask_instances WHERE claim_token IS NULL AND status='ready' ORDER BY created_at LIMIT 1) RETURNING …` inside `BEGIN IMMEDIATE` on a WAL-mode SQLite. No SELECT-then-UPDATE race.
 - `POST /work/{claim_token}/result` — submit a structured result. Validates against the subtask's `output_schema` and the claim is consumed atomically: `UPDATE subtask_instances SET result=?, status='done' WHERE claim_token=? AND status='claimed' AND expires_at>now() RETURNING …`. If the row no longer matches (TTL expired, already submitted), the call returns `{accepted: false, reason: 'claim_lost'}` and the agent's submission is discarded.
 
-**Claim semantics:**
+**Claim semantics (MVP):**
 
-- **One active claim per session.** `pull_task` refuses to issue a second claim while a session has one outstanding (returns the existing claim's metadata so the agent can resume). Eliminates the "which claim does this `task_tool` apply to" question.
-- **Soft TTL:** 10 minutes. Slides forward only on *successful* `task_tool` round-trip, so a stuck call or crashed agent doesn't extend a claim it isn't using.
-- **Hard wallclock cap:** 30 minutes from `pull_task`, regardless of slides. `expires_at = min(now() + 10min, claim_created_at + 30min)`.
-- **Cap pre-check:** Every `task_tool` response includes `wallclock_remaining_ms`. `task_tool` calls that would land their slide past the cap are rejected up-front with `{ok: false, errors: ["claim_near_expiry"]}` before the publisher round-trip — no successful call followed by a doomed `submit_result`.
-- On expiry the subtask instance returns to the pool with `claim_token = NULL`. A background sweeper runs every 30s to reset rows whose `expires_at < now()` (so the atomic `WHERE claim_token IS NULL` in `GET /work/next` sees them).
-- Bound to `claim_token`, not MCP session ID. Reconnects don't invalidate it; an agent can resume by passing `claim` to `task_tool` / `submit_result`.
-- Subcommand **schemas** (input, output, help) are snapshotted into the claim row at issue time so mid-flight pipeline upserts can't change them under an active agent. Subcommand **endpoint URLs** are resolved live from the run's pinned pipeline version, so a publisher can hot-fix a wrong URL without breaking in-flight claims. Murmur passes `X-Murmur-Pipeline-Id`, `X-Murmur-Pipeline-Version`, and `X-Murmur-Subcommand` headers on every proxy call so the publisher can detect and reject contract-skew at the server.
-- Pipeline upserts create a new `version`; in-flight runs stay pinned to the version they started with.
+- **Fixed 10-minute TTL.** No sliding, no hard cap, no pre-check. Agents that don't complete within 10 minutes lose their claim; the subtask returns to the pool. Demo runs complete in 2–5 min after rehearsal; this is sufficient.
+- A background sweeper runs every 30s to reset rows whose `expires_at < now()` (so `WHERE claim_token IS NULL` in `GET /work/next` sees them).
+- Bound to `claim_token`, not MCP session ID. Reconnects don't invalidate it; the agent passes `claim` explicitly to `task_tool` / `submit_result` (no session-based fallback).
+- Subcommand **schemas and endpoint URLs are read live** from the current pipeline def at every dispatch. No per-claim snapshot. Pipeline upserts are last-write-wins; an agent mid-claim sees the new schema on its next `task_tool` call. Acceptable for one publisher with rare upserts; reinstate per-claim snapshot + version pinning for multi-publisher production.
+- Murmur passes two headers on every proxy call:
+  - `X-Murmur-Subcommand` — the subcommand name being invoked.
+  - `X-Murmur-Claim-Token` — the canonical session key the publisher uses to keep claim-scoped state across subcommand calls (load-bearing for ws-style flows where `select monitor --as cfg-1`, `run monitor --config cfg-1`, and `feedback` all share state).
 
 No retries on schema-validation failure for MVP — the run fails.
+
+**Reinstated for full ws coverage** (post-demo): sliding TTL on success, hard 30-min wallclock cap, `wallclock_remaining_ms` pre-check, schema snapshot per claim, pipeline version pinning, `claim_closed` lifecycle callback, additional `X-Murmur-Pipeline-*`/`Run-Id`/`Subtask-Instance-Id` headers.
 
 ### 3.4 MCP server (agent-facing)
 
 Three static tools, fixed for the lifetime of the connection:
 
 - `pull_task()` → `{ instructions, input, output_schema, claim }` or `null`.
-- `submit_result(claim, result)` → `{ accepted: true } | { accepted: false, errors: [...] }`.
-- `task_tool(subcommand: string, args?: object, claim?: string)` → `string | object` — universal dispatcher. Invokes a publisher-declared subcommand for the agent's active claim (see §3.1). Static description (visible to the host's tool catalog):
+- `submit_result(claim, result, notes?)` → `{ accepted: true } | { accepted: false, errors: [...] }`. `notes` is an optional free-text reflection persisted in the audit log alongside the structured `result`.
+- `task_tool(subcommand: string, claim: string, args?: object)` → `string | object` — universal dispatcher. Invokes a publisher-declared subcommand for a claim (see §3.1). `claim` is required (no session-based fallback in MVP). Static description (visible to the host's tool catalog):
 
-  > *Invoke a subcommand for the current claim. The subtask `instructions` will tell you which subcommands to use and when; `task_tool('<name>', {...})` invokes one. Use `task_tool('help')` or `task_tool('help <name>')` only when you need schema-level detail beyond what `instructions` already gives you (e.g., the exact field names of a config object).*
+  > *Invoke a subcommand for the current claim. The subtask `instructions` will tell you which subcommands to use and when; `task_tool('<name>', '<claim>', {...})` invokes one. The `claim` value is what `pull_task` returned in its `claim` field.*
 
-Built-in subcommands provided by Murmur for every claim:
-
-- `help` — list available subcommands with their help text. Useful fallback when subtask `instructions` don't cover what the agent needs.
-- `help <name>` — return the named subcommand's `input_schema`, `output_schema`, and help text.
-
-**Dispatch:** Murmur resolves the active claim from the optional `claim` arg, falling back to the session's single active claim (`pull_task` enforces one-per-session, §3.3). With the claim known, Murmur looks up the subcommand in the claim's snapshotted schema set, validates `args` against `input_schema`, checks the cap pre-check (§3.3), resolves the endpoint URL from the run's pinned pipeline version, POSTs with the publisher-failure protections in §3.6, and returns the response — augmented with `wallclock_remaining_ms`. The claim's TTL slides forward only on a successful (non-error) round-trip.
+**Dispatch:** Murmur looks up the subcommand in the run's current pipeline def, validates `args` against `input_schema`, POSTs to the declared `endpoint` with the publisher-failure protections in §3.6, and returns the response.
 
 **Errors:**
 
-- No active claim → suggests calling `pull_task` first.
-- Unknown subcommand → suggests `task_tool('help')`.
+- Claim unknown / expired → `claim_lost`; agent should call `pull_task` again.
+- Unknown subcommand → returns the list of valid subcommand names for this claim's subtask.
 - Args fail validation → returns schema errors.
-- `claim_near_expiry` → call would slide past hard cap; agent should `submit_result` now or accept the run will fail.
 - Publisher endpoint failure → see §3.6.
 
-Optional static tool, post-MVP:
-
-- `report_blocker(claim, reason)` — agent declines, subtask returns to pool with a recorded reason.
+**Reinstated for full ws coverage** (post-demo): built-in `help` / `help <name>` subcommands (instructions text covers it for now); built-in `blocked` for graceful give-up (replaced for MVP by claim TTL expiry + operator triage); `status` for resume after disconnect; `report_blocker` static tool. None of these are load-bearing for the demo.
 
 Configured by the agent's host (Claude Code, Cursor, …) via one line in `mcp.json`.
 
@@ -224,36 +350,31 @@ Agent then calls `submit_result("c_a1b2c3", ...)` with:
 }
 ```
 
-Murmur validates against `output_schema`, marks the subtask done, and advances the run. The agent's next `pull_task()` returns `configure-scraper`.
+Murmur validates against `output_schema`, marks the subtask done, and advances the run. The agent's next `pull_task()` returns the next pending subtask in the run (typically the next `configure-board` instance, or — when all configure-boards are done — closes the run).
 
 ### 3.6 Failure modes & demo-grade security
 
 Specified explicitly to avoid implementation surprises.
 
-**Demo-grade auth (replaces "no auth" cut).** Murmur is publicly hostnamed before the demo; "no auth" is a demo disruption vector. Two demo-grade tokens, both shared but scoped:
+**Demo-grade auth (replaces "no auth" cut).** One shared bearer token, `MURMUR_TOKEN`, gates every Murmur endpoint (publisher API + MCP transport). Required on every request as `Authorization: Bearer …`. Set via env var on the box, rotated per deployment.
 
-- **`AGENT_TOKEN`** — gates the agent surface (`GET /work/next`, `POST /work/{claim}/result`, MCP transport, including reconnects). Required on every request as `Authorization: Bearer …` (Streamable HTTP has no separate handshake; auth is per-request, including resume).
-- **`PUBLISHER_TOKEN`** — gates the publisher surface (`POST /pipelines`, `POST /pipelines/{id}/runs`). Separate so a leaked agent token can't upsert a malicious `instructions` payload (which would, via the jobseek cron fallback, become RCE in jobseek's CI).
-- Both tokens set via env var on the box, rotated per deployment. Single shared values within each role.
-- **No `GET /pipelines/{id}` for MVP.** Read access to stored pipeline defs is not exposed; published `endpoint` URLs are visible only to running claims (which receive their own subcommand schemas, not arbitrary pipelines'). Closes the `webhook_secret` exfil path.
-- Adequate for a closed demo deployment. Not adequate for real users — no per-user identity, no rate limiting, no revocation primitive without redeploy.
-
-**Webhook signing.** Murmur's webhook POSTs are signed with HMAC-SHA256 over the body, using a per-publisher `webhook_secret`:
-
-- Provenance: secret is provided at registration time as part of an out-of-band setup, *not* committed to the publisher's pipeline def YAML. Publishers store it in their CI secret manager and template it into the `POST /pipelines` request body.
-- Storage in Murmur: hashed at rest (Argon2id) for verification only; never returned by any API.
-- Rotation: a fresh `POST /pipelines` with a new `webhook_secret` updates it; webhooks for in-flight runs use the secret active at run-start (pinned in the run row).
+- **No `GET /pipelines/{id}`** — read access to stored pipeline defs is not exposed.
+- **Webhook auth: bearer in, not HMAC out.** Murmur's webhook POSTs to the publisher carry the same `MURMUR_TOKEN` as `Authorization: Bearer …`. The publisher's accept handler verifies the bearer and trusts the body. No HMAC, no per-publisher secret, no Argon2id storage. Adequate when (a) publisher's webhook is reachable only via Cloudflare Tunnel + bearer + TLS and (b) there's one trusted publisher.
+- Adequate for a closed demo deployment. Not adequate for real users — no per-user identity, no privilege separation between agents and publishers, no rate limiting, no revocation primitive without redeploy.
 
 **Publisher SSRF defense.** Murmur faithfully proxies the agent's `args` to the publisher's endpoint. Publisher probe endpoints that accept URLs (e.g., jobseek's `board_url`, `sample_url`) MUST allowlist hosts and reject private/loopback/link-local/metadata-service IPs after DNS resolution (with rebinding protection: resolve once, post and check the resolved IP). Allowlist by host pattern alone is *not* sufficient — subdomain takeovers and vendor-hosted careers pages can match patterns like `*.greenhouse.io`. Documented as a publisher requirement in §4.2.
 
-**Murmur-side SSRF defense.** Pipeline `endpoint` and `webhook` URLs are publisher-controlled; a malicious pipeline could point them at metadata services. On registration, Murmur rejects URLs whose host resolves to private/loopback/link-local/metadata IPs, and re-checks at dispatch (DNS rebinding guard). Both rejections are hard 4xx at registration / hard structured error at dispatch.
+**Reinstated for full ws coverage** (post-demo): scoped `AGENT_TOKEN` / `PUBLISHER_TOKEN` (privilege separation), HMAC-SHA256 webhook signing with per-publisher `webhook_secret` (Argon2id-hashed at rest), Murmur-side SSRF defense on `endpoint`/`webhook` URLs (DNS-rebinding-aware) at registration + dispatch. All required when onboarding untrusted publishers.
 
 **Failure modes:**
 
 - **Publisher endpoint slow / hung.** Hard 15s timeout on every `task_tool` proxy call. On timeout, Murmur returns `{ok: false, errors: ["publisher_timeout"]}` to the agent (structured, so the agent can react) rather than letting the MCP call hang. Outbound HTTP connection pooled with a hard limit; no per-call leak.
 - **Publisher endpoint 5xx.** Returned to the agent as `{ok: false, errors: ["publisher_5xx", "<status>"]}`. No automatic retry — the agent decides whether to retry, and the publisher sees one call per agent decision.
 - **Publisher response too large.** 1 MB cap on response body. Truncated responses are returned with `{ok: false, errors: ["publisher_response_too_large"]}` so probes can't be used to dump unbounded data through Murmur.
-- **Webhook delivery.** On run completion Murmur POSTs `final_output` to the publisher's webhook with an `Idempotency-Key: <run_id>` header. One retry on non-2xx after 30s. Publishers must treat the key as deduplication input — the same `final_output` may arrive twice.
+- **Webhook delivery.** On run completion Murmur POSTs `final_output` to the publisher's webhook with `Authorization: Bearer <MURMUR_TOKEN>` and `Idempotency-Key: <run_id>`. One retry on non-2xx after 30s. Publishers verify the bearer, dedupe on the idempotency key.
+- **Audit log payload truncation.** Every `task_tool` call's args+response are logged to `agent_actions`. Fields are silently truncated to a fixed 4 KB cap. No `_truncated` map for MVP — consumers needing lossless capture should sample-snapshot at the publisher endpoint instead. (Full structured truncation map reinstated post-MVP.)
+- **Audit log retention.** Per-run audit trails are kept for 30 days post run-completion, then deleted by a background sweeper.
+- **Webhook accept-handler contract.** Publishers MUST: (a) cap webhook body size before reading (suggest 5 MB; reject 413 otherwise); (b) verify the bearer token; (c) treat `Idempotency-Key: <run_id>` as a transactional dedupe key with a UNIQUE constraint on the writer's catalog table; (d) return 2xx for already-applied keys (idempotent success). Documented in §4.1.
 - **Claim TTL vs. in-flight `submit_result`.** The atomic CAS on `(claim_token, status='claimed', expires_at>now())` means a submission arriving after TTL expiry is rejected with `claim_lost` rather than overwriting state shared with a fresh claim.
 - **Claim TTL vs. in-flight `task_tool`.** TTL slides forward only on a successful round-trip, capped by the hard 30-minute wallclock. A probe that takes 10s won't expire the claim mid-flight; a stuck or crashed agent doesn't keep extending a claim it isn't completing.
 - **MCP transport reconnect.** Claims are bound to `claim_token`, not session ID. An agent reconnecting after a Cloudflare Tunnel idle drop can resume by passing `claim` to `task_tool` / `submit_result`. Murmur sends Streamable HTTP keepalives every 25s to head off idle drops.
@@ -269,10 +390,10 @@ Specified explicitly to avoid implementation surprises.
 
 Any publisher integrates with Murmur in four steps:
 
-1. **Author a pipeline definition** in YAML — initial input schema, ordered subtasks (each with instructions, input refs, output schema), webhook URL, and `webhook_secret` for HMAC signing.
-2. **Register it** via authenticated `POST /pipelines` (typically from CI on change).
+1. **Author a pipeline definition** in YAML — initial input schema, ordered subtasks (each with instructions, input refs, output schema as JSON Schema), and a webhook URL. JSON Schema is written directly in YAML; no shorthand preprocessor.
+2. **Register it** via authenticated `POST /pipelines` (typically from CI on change). Last write wins; no version tracking for MVP.
 3. **Trigger runs** by POSTing to `/pipelines/{id}/runs` whenever the publisher's app needs the work done.
-4. **Accept results** at the webhook URL — verify the HMAC signature against the shared secret, then apply `final_output`.
+4. **Accept results** at the webhook URL — verify the bearer (`MURMUR_TOKEN`), dedupe on `Idempotency-Key: <run_id>`, then apply `final_output`.
 
 Optional: declare **subcommands** under each subtask in the pipeline def for in-subtask verification (see §3.1 for shape, §3.4 for dispatch). The same validation logic typically powers both the in-subtask subcommands and the final-output check at the accept webhook, so one implementation serves both call sites.
 
@@ -294,28 +415,77 @@ What Murmur owns end-to-end for any publisher:
 
 For a brownfield publisher with an existing validation library and CSV/DB writers (jobseek), this is mostly wiring. For a greenfield publisher, items 4 and 5 dominate the integration cost.
 
+**Subcommand endpoints: public hostname for MVP.** Subcommand `endpoint` URLs in pipeline defs use the publisher's public hostname (e.g., `jobseek.colophon-group.org`). Murmur's box and jobseek's box share a private VPC (per §6.1), but routing all subcommand traffic over the public path simplifies deploy, lets the same endpoint serve curl/dev tooling, and adds only ~30ms per call — acceptable for the demo. Post-MVP: a `private_endpoint` field for in-VPC routing (a 1-line schema addition; deferred until call volume justifies the optimization).
+
+**Subcommand state contract.** Publishers that keep claim-scoped state (e.g., named `--as cfg-1` configs) MUST: (a) key state on `(X-Murmur-Run-Id, X-Murmur-Subtask-Instance-Id, X-Murmur-Claim-Token)`; (b) treat the `claim_closed` notification (§3.3) as the cleanup signal; (c) tolerate a 60-minute hard TTL on claim-scoped storage even without a notification (defense against missed callbacks); (d) treat agent reconnect as best-effort — if state is gone, return a structured error so the agent can retry from a known beat. This is the load-bearing contract for ws-style flows.
+
 ### 4.2 Worked example: jobseek
 
-Jobseek is the demo publisher and the only integrator for MVP. It's a brownfield case: it has an existing `ws` workflow built on git/PRs that Murmur replaces in part. Today `ws` uses git for two things — multi-agent collaboration (one branch per company-in-progress) and work persistence (workspace state on the branch) — both of which move to Murmur. The git/PR machinery comes out of jobseek; the validation/probe logic stays, refactored from CLI commands into importable async functions.
+Jobseek is the demo publisher and the only integrator for MVP. It's a brownfield case: it has an existing `ws` workflow built on git/PRs that Murmur replaces in full. Constraint set by the project: **the ws→Murmur reimplementation must not lose any ws functionality** — git/branch/PR/worktree/issue-claim machinery is replaced by Murmur primitives (not lost), and every other ws capability maps to a Murmur subtask, subcommand, or audit endpoint. The full mapping is in §9 (coverage matrix); this section covers the run-level shape.
 
-| Concern | Owner after port | Notes |
-|---|---|---|
-| In-flight crawler-config state | Murmur (runs + subtasks + results) | Replaces `.workspace/<slug>/`, draft PRs, per-company branches |
-| Multi-agent coordination | Murmur (claim model) | Replaces "one agent per branch"; parallel across runs, sequential within a linear run |
-| Audit trail of who-did-what | Murmur (`runs`, `subtask_results`) | Replaces `git log` for this domain |
-| Subtask instructions | jobseek `apps/crawler/murmur/pipelines/*.yaml`, content adapted from `workspace/steps/*.md` | Strip `ws`-CLI references; keep the decision content |
-| In-subtask verification | jobseek public probe endpoints (see below) | Called by the agent during the configure-* subtasks |
-| Final-output validation | jobseek `apps/web` accept handler, calling the same probe functions | Final guard before applying |
-| Final acceptance | jobseek accept handler writes directly to `companies.csv` / `boards.csv` (or DB) | Replaces PR + auto-merge |
-| Run trigger | jobseek's `requestCompany` POSTs to Murmur | Replaces GH-issue creation for new requests |
+**Run shape.** A run of `jobseek/add-company` mirrors the 7-step ws workflow:
 
-Jobseek exposes two HTTP probe endpoints under `jobseek.colophon-group.org` — `POST /api/murmur/probes/monitor` and `…/probes/scraper` — declared as `test monitor` and `test scraper` subcommands in the configure-* subtasks (see §3.1 for the full pipeline def with schemas). Agents invoke them as `task_tool("test monitor", {...})` and `task_tool("test scraper", {...})`. Both endpoints are thin shims around the same probe logic the accept handler runs as a final guard before applying `final_output`. One implementation, three callers (agent → `task_tool` → HTTP, accept handler in-process, manual debugging via curl).
+| Subtask | ws step it replaces | Decision the agent makes | Spawns / skip |
+|---|---|---|---|
+| `pre-verify` | step 00 | Is this a real, non-duplicate company? Confirm name + website. | — |
+| `setup-metadata` | step 01 | Logo selection, descriptions (4 locales), industry, employee_count_range, founded_year, logo_type. | — |
+| `list-boards` | step 02 | Ordered list of boards (alias + URL + optional job-link-pattern). | `spawns: { for_each: boards, template: configure-board }` |
+| `configure-board` (one per board) | steps 03 + 04 + 05 fused | `outcome` (configured / phantom / parent-portal / unsupported); when configured: monitor type+config, optional scraper type+config, per-field quality verdict. | scraper fields nullable when monitor auto-configures; non-configured outcomes skip the populating subcommands |
+| (no dedicated reflect subtask) | step 07 | Each subtask explicitly declares optional `kb_entries` / `case_studies` arrays in its `outputs`. The pipeline's `final_output.composes` rule flattens them across subtasks. Jobseek's accept handler ingests. | — |
 
-`find-board` doesn't declare any subcommands for MVP — the agent uses its own web fetch and a documented list of board-host patterns (`*.greenhouse.io` → greenhouse, `jobs.lever.co/<co>` → lever, `*.myworkdayjobs.com` → workday, …). If find-board picks the wrong URL the configure-* probes will all fail; for MVP we pre-test the demo company.
+Submit (ws step 06) is no longer an agent action — it's automatic at run-completion when all subtasks have valid outputs. Final-output validation runs in jobseek's accept handler (the same probe library the subcommands wrap).
 
-What jobseek removes: GH-issue creation in `requestCompany`, draft-PR machinery, `workspace.yaml`, per-company branches, `ws task` / `ws new` / `ws await-board` / `ws submit`. What it keeps: monitor + scraper class library, probe/validation logic (refactored as importable), data-source writers, the `companyRequest` table, and `resolve-company-requests.yml` — repurposed as a fallback Murmur agent that periodically spawns a Claude Code Action to pull and complete any unclaimed subtasks (and re-POSTs `companyRequest` rows that never reached Murmur). From Murmur's perspective this cron is just another agent. Devs never manually configure companies; the worst-case escape hatch is hand-editing the CSVs.
+**Subcommand surface (per subtask)**, matching ws's CLI breadth so the agent has parity with what `ws` exposes today:
 
-**Probe SSRF defense (jobseek-side).** Per §3.6, the publisher must filter URLs the agent submits. Jobseek's monitor and scraper probes accept only `board_url` / `sample_url` whose host matches the documented board-host allowlist (`*.greenhouse.io`, `jobs.lever.co/*`, `*.myworkdayjobs.com`, …). Anything else returns `{ok: false, errors: ["url_not_allowed"]}` immediately, before any outbound fetch.
+- **`pre-verify`**: `search companies`, `verify company`, `kb search`, `kb view`.
+- **`setup-metadata`**: `discover company` (kicks off logo + enrichment), `list logo candidates`, `taxonomy search`, `kb search`, `kb view`.
+- **`list-boards`**: `analyze hreflang`, `infer link pattern`, `kb search`, `kb view`. (No `compare boards` here — board reconciliation runs in jobseek's accept handler against `final_output`; agents shouldn't delete boards based on overlap with the catalog they can't see.)
+- **`configure-board`**: `probe monitor`, `select monitor <type> --as <name>`, `run monitor`, `probe scraper`, `select scraper`, `run scraper`, `probe deep`, `probe api`, `feedback --verdict <…> --per-field …`, `select config <name>`, `reject-config <name> --reason …`, `kb search`, `kb view`. Agent iterates: probe → review costs/options → select with `--as <name>` → run → if results disagree with expected job count, **iterate config** (don't immediately switch monitor type) → run again → feedback. Multiple named configs may be tried before final selection. If the agent decides the work is unsalvageable, `task_tool('blocked', ...)` releases the claim and the publisher decides what to do.
+- **All subtasks** also have `kb search`, `kb view` available. KB additions and case studies are explicit optional `kb_entries` / `case_studies` arrays on each subtask's `outputs` schema (see §3.1 example). The pipeline's `final_output.composes` rule flattens them across subtasks; the accept handler ingests them.
+
+**`kb search` vs. `kb view`.** ws's KB has 100+ entries; full-body responses for a multi-result search would blow Murmur's 1 MB response cap (§3.6). Convention: `kb search` returns ranked summaries `[{path, symptom, tags, snippet}]` with no bodies; `kb view <path>` returns a single full entry. Same publisher endpoint with two paths.
+
+**Storage migration on jobseek's side (independent of Murmur).** Jobseek is moving its catalog (companies, boards, monitor/scraper configs) and KB out of disk + git into a local Postgres instance on the crawler box. Murmur is unchanged by this — it sees only the publisher's HTTP surface and the accept-webhook target. Effects on the integration: `kb search` / `kb view` query Postgres rather than reading markdown files; the accept handler writes companies/boards/KB rows to Postgres rather than appending to CSVs and committing markdown. KB content authored by agents during a run flows through `final_output.kb_entries` / `final_output.case_studies` (aggregated by Murmur from optional subtask outputs); the accept handler ingests them directly. No git commit anywhere on the agent path.
+
+Each of these wraps an existing function from `apps/crawler/src/workspace/commands/*.py` — refactored from CLI binding into an importable async function plus an HTTP shim. One implementation per command, three callers: agent (via `task_tool`), accept handler (in-process for final-output validation), curl/dev tooling.
+
+**Workflow control mapping.**
+
+- `ws task next` → implicit on `submit_result` (run advances).
+- `ws task back --to <step>` → agent calls `task_tool('blocked', ...)`; publisher issues a fresh run with `prior_outputs` for the work it wants kept (no native rewind in Murmur — see §3.4).
+- `ws task fail --reason` → `task_tool('blocked', { reason })`.
+- `ws task complete` → automatic at final subtask submit; jobseek's accept handler does the trace upload and any cleanup.
+- `ws task troubleshoot` / `ws help` → KB browsing exposed as `task_tool('kb search …')` / `task_tool('help …')`.
+- `ws status` / `ws resume` → `task_tool('status')`.
+- `ws task learn` / `ws task casestudy` → optional `kb_entries` / `case_studies` arrays declared on each subtask's `outputs` (§3.1); flattened into `final_output` by the pipeline's `composes` rule.
+- `ws new --reconfig` → `POST /pipelines/{id}/runs` with `prior_outputs` populated from the existing company's data.
+
+**Trace export (HF dataset).** Jobseek's accept handler reads `GET /runs/{id}` after webhook delivery, extracts the per-subtask audit log + `_notes`, and uploads to the existing Hugging Face dataset. Murmur exposes the audit; the upload remains a publisher concern.
+
+**What jobseek removes** (replaced by Murmur primitives, *not* lost): GH-issue creation in `requestCompany`, draft-PR machinery, `.workspace/<slug>/` dir, `workspace.yaml`, `boards/<alias>.yaml`, per-company branches, worktrees, `ws new` / `ws await-board` / `ws boards-done` / `ws submit` / `ws use` / `ws del` (workflow CLI), CSV conflict resolution. The cron `resolve-company-requests.yml` becomes a fallback Murmur agent that pulls + completes any unclaimed subtasks (and re-POSTs `companyRequest` rows that never reached Murmur). From Murmur's perspective this cron is just another agent. Devs never manually configure companies; the worst-case escape hatch is hand-editing the CSVs.
+
+**What jobseek keeps** (now exposed as subcommand HTTP endpoints): monitor + scraper class library, probe/validation logic (refactored as importable async + HTTP shim), data-source writers, taxonomy + KB readers and writers, logo / enrichment discovery, board comparison, the `companyRequest` table, the `inspect.py` CSV validator.
+
+**Probe SSRF defense (jobseek-side).** Per §3.6, the publisher must filter URLs the agent submits. Jobseek's `probe`/`run` subcommands accept only `board_url` / `sample_url` whose host matches the documented board-host allowlist (`*.greenhouse.io`, `jobs.lever.co/*`, `*.myworkdayjobs.com`, …) and reject private/loopback/link-local/metadata IPs after DNS resolution (rebinding-aware). Anything else returns `{ok: false, errors: ["url_not_allowed"]}` immediately.
+
+**Board reconciliation is jobseek's accept-handler responsibility, not the agent's.** When the webhook fires with `final_output`, jobseek runs `compare-boards` on the configured boards (the same logic ws today uses post-discovery) and decides:
+
+- **MIRROR** (>90% URL overlap between two configured boards): keep one, drop the other. Heuristic: keep the lower-cost monitor type; on tie, keep the more specific (regional/functional) board over a generic mirror.
+- **SUBSET** (board A's URLs strictly contained in board B's): drop A.
+- **OVERLAP** (20–80% URL intersection): keep both, but record the overlap percentage on each board row so the catalog ingestion knows to dedupe at job level.
+- **PHANTOM** (`outcome=phantom`): drop the board entirely; no catalog row written. Log `phantom_evidence` for operator review.
+- **PARENT-PORTAL** (`outcome=parent-portal`): drop the board, queue a fresh `requestCompany` for the `parent_company_hint` if it's not already in the catalog. The original company's run still applies for any other configured boards (some companies have *both* their own boards and a parent portal).
+- **UNSUPPORTED** (`outcome=unsupported`): drop the board, file an internal issue with `unsupported_reason` for the engineering team to either add a monitor type or improve probe coverage.
+
+Reconciliation runs against the run's own boards plus any existing boards already in the catalog under this slug (for reconfig runs). The accept handler is the single authoritative writer; agents never delete boards directly. This is the same pattern as ws's `_auto_compare_boards` logic in `apps/crawler/src/workspace/commands/crawl.py`, lifted out of the agent loop.
+
+**Heavy multi-board scale.** Real configurations include Adani (15 Oracle HCM sites), ByteDance (29 api_sniffer boards parametrized by job-category), Omnicom (33 Greenhouse subsidiaries). Sequential `configure-board` claims at ~5 min each = 30+ minutes for ByteDance, ~2.5 hours for Omnicom — too long for one interactive Claude Code session. Mitigations:
+
+1. **Publisher-side run splitting.** Jobseek's `requestCompany` for known multi-tenant cases (Omnicom, holding companies) issues N runs, one per logical cluster, each with a slice of `boards`. The cron fallback (§4.2) picks them up.
+2. **Parametrized monitors as one configure-board.** Cases like Accenture (12 country-parametrized boards on one URL), Adani (15 Oracle HCM site IDs) actually want one `configure-board` returning a list of `{site_id, country, language}` parameters — not 12-15 separate `configure-board` instances. Pipeline accommodates this by letting `monitor_config` itself contain the parametrization array; jobseek's accept handler expands it into N `boards.csv` rows. This is a publisher-side schema choice, not a Murmur primitive.
+3. **Concurrent claims within a run** (post-MVP per §5): unblocks long-tail per-board time, doesn't help wall-clock for one agent. Real fix is #1 + #2.
+
+This means `list-boards` agents should consolidate parametrized variants into one entry per *distinct ATS instance*, not per region — matching how the catalog actually models them today.
 
 ### 4.3 Illustrative example: `demo/translate-grade`
 
@@ -352,7 +522,97 @@ Sized to be readable at a glance: ~80 LoC if it were ever built (pipeline YAML, 
 
 - **Demo-grade auth only.** Single shared bearer token across the deployment (see §3.6). No per-user identity, no per-publisher API keys, no rate limiting, no anti-abuse. Adequate for a closed demo, not for real users.
 - **One pass per pipeline.** No parallel claims, no aggregation, no voting. Architecture is forward-compatible (claim-based, not assign-based) but the feature is not built.
-- **Linear pipelines only.** No DAG, no branching, no skip-on-error.
+- **Sequential subtask claims within a run.** Sibling subtasks declared with `requires` (§3.1) could be claimed concurrently; for MVP the server takes them one at a time. ws's parallel Track A/B/C is an acknowledged loss with mitigation in §9.8.
+- **Pipeline-def shape: dynamic but acyclic.** With `spawns` and `skip_if` (§3.1) the run topology is computed from prior outputs at runtime — not "linear" in a strict sense. No DAG cycles; no agent-defined branching beyond what `skip_if` and `spawns.for_each` provide.
+
+### 5.1 Demo-minimum subset (vs. full ws-coverage)
+
+Two implementation tiers, both within the spec:
+
+**Demo minimum** (one pre-validated company, ~16–22 person-days realistic — see §5.2 for the breakdown that justifies the higher number vs. the optimistic ~6–9 day check). Pipeline: `pre-verify` → `list-boards` → one or more `configure-board` instances → submit. **`spawns` is required even for the demo** because a real "single-board" company often discovers a second board during `list-boards` (a careers page + a smartrecruiters mirror, or hreflang variants). Pre-validating the demo company means confirming `list-boards` returns ≤2 boards, but without `spawns` the second one has nowhere to go. **Required for demo:** `spawns`, schema validation (Ajv + YAML preprocessor), claim TTL semantics, atomic claim pickup. **Deferred:** `skip_if`, `prior_outputs` reconfig, `blocked`/`status` built-ins, `claim_closed` lifecycle callbacks, KB reads/writes, multi-config iteration via `--as cfg-N`, audit endpoint full shape. Subcommand surface limited to `probe monitor`, `run monitor`, `probe scraper`, `run scraper`, `feedback` (5 — see §5.2 for the actual jobseek work).
+
+**Full ws coverage** (per §9, ~24–38 person-days *on top of* demo-minimum): adds `skip_if`, `blocked`/`status` primitives, `prior_outputs` reconfig with composite-path addressing, `claim_closed` lifecycle callback, `kb search` / `kb view` subcommands available everywhere, per-subtask `kb_entries`/`case_studies` outputs flattened into `final_output`, audit endpoint with `agent_actions` per subtask, taxonomy add via operator path, full subcommand surface (~25 endpoints), parent-portal idempotency. Required to retire `ws` entirely; not required for the demo.
+
+Implementing demo-minimum first, then layering the rest, is the recommended order. This section's purpose is to keep §9's "Hosted" rows from masquerading as MVP scope.
+
+### 5.2 Delivery split: Murmur package vs. jobseek changes (for the demo)
+
+What gets built where to make the §2 demo run end-to-end. Items marked ⊘ are full-coverage features deliberately deferred from the demo path. Items marked ✓ must ship before the demo.
+
+**In the Murmur package** (`/Users/Viktor/murmur`):
+
+| Item | Demo? |
+|---|---|
+| Hono HTTP server with single shared bearer-token auth (`MURMUR_TOKEN`) | ✓ |
+| SQLite (WAL) schema: `pipelines`, `runs`, `subtask_instances`, `subtask_results`, `agent_actions` | ✓ |
+| MCP server with three static tools (`pull_task`, `submit_result`, `task_tool`) over Streamable HTTP | ✓ |
+| Publisher API: `POST /pipelines` (last-write-wins, no version), `POST /pipelines/{id}/runs`, `GET /runs/{run_id}` | ✓ |
+| Agent API: atomic `GET /work/next` (`UPDATE … RETURNING` in `BEGIN IMMEDIATE`), atomic `POST /work/{claim}/result` (CAS) | ✓ |
+| `task_tool` dispatch: lookup subcommand in current pipeline, validate `args`, HTTP proxy with 15s timeout + 1 MB cap | ✓ |
+| `X-Murmur-Subcommand` + `X-Murmur-Claim-Token` headers on proxy calls | ✓ |
+| Claim semantics: fixed 10-min TTL, sweeper every 30s, claim bound to token | ✓ |
+| Webhook delivery: bearer-authed POST + `Idempotency-Key: <run_id>` + one retry on non-2xx | ✓ |
+| Pipeline-def YAML uses JSON Schema directly (no shorthand preprocessor) | ✓ |
+| Output schema validation (Ajv) on `submit_result` | ✓ |
+| `spawns` (variable-count children, runtime instantiation) | ✓ — load-bearing even for "one company" demos when `list-boards` finds 2+ boards |
+| Audit log: silent fixed-size (4 KB) field truncation; basic `console.log` | ✓ |
+| Deploy: `Dockerfile` for `linux/arm64`, `docker-compose.yml`, `deploy.sh`, GH Actions workflow | ✓ |
+| Cloudflare Tunnel config + `cloudflared` container | ✓ |
+| Streamable HTTP transport validated through Cloudflare Tunnel for a real Claude Code session | ✓ (validate before relying on it) |
+| **Reinstated for full ws coverage** (deferred from demo) | |
+| Scoped `AGENT_TOKEN` / `PUBLISHER_TOKEN` (privilege separation), token rotation/revocation | ⊘ |
+| HMAC-SHA256 webhook signing + per-publisher `webhook_secret` (Argon2id-hashed at rest) | ⊘ |
+| Murmur-side SSRF defense on `endpoint`/`webhook` URLs (DNS-rebinding-aware) | ⊘ |
+| Sliding TTL on success, hard wallclock cap, `wallclock_remaining_ms`, cap pre-check | ⊘ |
+| One-active-claim-per-session rule | ⊘ (agent passes `claim` explicitly always) |
+| Schema-snapshot per claim, pipeline version pinning, additional `X-Murmur-Pipeline-*`/`Run-Id`/`Subtask-Instance-Id` headers | ⊘ |
+| Built-in subcommands `help`, `help <name>`, `blocked`, `status`; `claim_closed` lifecycle callback | ⊘ |
+| `skip_if` (JSONLogic on prior outputs); `prior_outputs` on run creation | ⊘ |
+| `_truncated` path-keyed-map in audit log; structured audit endpoint with full `agent_actions[]` shape | ⊘ |
+| YAML→JSON-Schema shorthand preprocessor | ⊘ |
+| SQLite `.backup` pre-snapshot cron | ⊘ |
+
+**In jobseek** (`/Users/Viktor/jobseek`):
+
+| Item | Demo? | Where in jobseek |
+|---|---|---|
+| Pipeline-def YAML for `jobseek/add-company` (demo-minimum shape) | ✓ | `apps/crawler/murmur/pipelines/add-company-demo.yaml` |
+| CI step (or rehearsal script) to register pipeline via `POST /pipelines` | ✓ | `apps/crawler/murmur/scripts/register.ts` (or shell script) |
+| Run trigger: `requestCompany` (or curl on a side terminal) POSTs to `/pipelines/jobseek-add-company/runs` with `{company_name, website}` | ✓ | `apps/web/src/lib/actions/stats.ts` *or* a demo-only button |
+| Webhook accept handler: verify bearer (`MURMUR_TOKEN`), dedupe by `Idempotency-Key`, write to catalog | ✓ | `apps/web/src/app/api/murmur/accept/route.ts` |
+| Refactor `ws probe monitor` / `ws run monitor` / `ws probe scraper` / `ws run scraper` / `ws select monitor` / `ws select scraper` / `ws feedback` from CLI bindings to importable async functions | ✓ | extract from `apps/crawler/src/workspace/commands/crawl.py` (~1700 LOC of the 2561-line file). Realistic effort: 5–7 days. Heavily coupled to `state.WorkspaceState`, `out.die`, file I/O, git. Needs (a) IO/state interface abstracted, (b) `out.die` → exception, (c) `asyncio.run` removed in favor of awaitable, (d) per-claim KV substituting for workspace YAML. Largest single risk in §5.2 estimate. |
+| HTTP shim subcommand endpoints (7 demo-path endpoints): `POST /api/murmur/probes/monitor`, `…/run/monitor`, `…/probes/scraper`, `…/run/scraper`, `…/select/monitor`, `…/select/scraper`, `…/feedback` | ✓ | new routes in `apps/web/src/app/api/murmur/` |
+| Per-claim subcommand state KV (keyed on `X-Murmur-Claim-Token`) for `select monitor --as cfg-N` named configs reused by `run monitor --config cfg-N` and `feedback` | ✓ — `configure-board` instructions explicitly tell the agent to iterate config under named labels | small Postgres table |
+| SSRF allowlist on `board_url` / `sample_url` (post-DNS-resolution check) | ✓ | shared util in subcommand routes |
+| Final acceptance: write to local Postgres (or for demo, append to `companies.csv` / `boards.csv` if Postgres migration not ready) | ✓ | accept handler |
+| Probe/validation library used both by subcommands and the accept handler's final-output guard | ✓ | one implementation (the refactored async functions above) |
+| 3 pre-validated demo-company candidates on a slide; rehearsed end-to-end | ✓ | rehearsal artifacts; not committed code |
+| Other subcommands (search companies, verify company, discover, taxonomy search, kb search, kb view, etc.) | ⊘ | post-demo |
+| `pre-verify` reject_reason handling, parent-portal queueing | ⊘ | post-demo |
+| Board reconciliation logic in accept handler (mirror/subset detection) | ⊘ | post-demo (single-board demo doesn't exercise it) |
+| `outcome=phantom`/`parent-portal`/`unsupported` handling | ⊘ | post-demo |
+| Murmur catalog/KB → local Postgres migration | ⊘ | parallel jobseek-side track |
+| Removal of `ws task` / `ws new` / draft-PR machinery / `resolve-company-requests.yml` cron | ⊘ | post-demo (ws stays operational alongside) |
+
+**Boundary contracts** (both sides agree on these before either starts coding):
+
+- Pipeline-def YAML schema (JSON Schema directly, no shorthand)
+- `MURMUR_TOKEN` format and lifetime (single shared bearer)
+- `X-Murmur-Subcommand` + `X-Murmur-Claim-Token` proxy headers (exact casing)
+- `task_tool` request/response envelope: `{ok: boolean, errors: string[]?, data: object?}`
+- `submit_result` validation-error shape (per-field JSON Pointer paths)
+- Webhook contract: bearer auth, `Idempotency-Key: <run_id>`, dedupe window on publisher side
+- `final_output.composes` flattening rules (including the cartesian product `boards: list-boards.boards × configure-board.*`)
+
+**Realistic demo-day-readiness estimate: ~10–14 person-days.** Breakdown:
+
+- Murmur core (HTTP + SQLite + atomic claim + MCP three tools + dispatch + spawns runtime + 2 headers + bearer auth + sweeper + Ajv validation): 3–4 days.
+- Streamable HTTP + ARM64 + Cloudflare Tunnel debugging (better-sqlite3 native rebuilds, MCP TS SDK reconnection through cloudflared, validating with a real Claude Code session): 2 days.
+- Jobseek refactor (lift 7 demo-path commands out of `crawl.py`'s ~1700 LOC of CLI-bound state, replace `out.die` + state YAML + `asyncio.run` with pure awaitable + per-claim KV): 4–5 days. **Largest single risk; first to slip.**
+- Webhook accept handler + final-output validation + catalog write to Postgres or CSV: ~1 day.
+- Rehearsal: pre-validate 3 candidate companies end-to-end, fall back when the first 1–2 break under non-determinism: ~2 days.
+
+Down from ~16–22 days by cutting: schema-snapshot + version-pinning, sliding TTL + cap pre-check + `wallclock_remaining_ms`, one-active-claim-per-session rule, scoped tokens, HMAC + Argon2id, Murmur-side SSRF on URLs, YAML→JSON-Schema preprocessor, `_truncated` path map, built-in `help`/`blocked`/`status`. Each can be reinstated post-demo when the deferral becomes load-bearing (multiple publishers, untrusted publishers, multi-tenant deployments).
 - **No retry on bad result.** Schema-fail = run-fail.
 - **MCP only on agent side.** No CLI, no `npx` runner. Demo target = Claude Code.
 - **One publisher (jobseek).** §4.3 sketches a hypothetical second publisher for reasoning purposes only; it is not built or demoed.
@@ -362,7 +622,7 @@ Sized to be readable at a glance: ~80 LoC if it were ever built (pipeline YAML, 
 
 **Load-bearing assumptions (not Murmur-side cuts but worth naming):**
 
-- The agent's host (Claude Code) provides web fetch. The jobseek `find-board` subtask depends on it.
+- The agent's host (Claude Code) provides web fetch. The jobseek `list-boards` subtask depends on it.
 - The host honors the static `task_tool` description well enough that the agent reads `instructions` first and only consults `help` when needed (publisher convention, not Murmur-enforced).
 
 ---
@@ -426,7 +686,7 @@ Mirrors jobseek's `deploy-crawler-browser.yml`:
    - `docker compose pull && docker compose up -d --remove-orphans`.
    - Apply pending SQLite migrations (single tracked schema version).
 
-Secrets in the GH `production` environment: `CLOUDFLARE_TUNNEL_TOKEN`, `OWNER`, GHCR pull credentials, `AGENT_TOKEN`, `PUBLISHER_TOKEN`. No `.env` checked in; ephemeral on the box.
+Secrets in the GH `production` environment: `CLOUDFLARE_TUNNEL_TOKEN`, `OWNER`, GHCR pull credentials, `MURMUR_TOKEN`. No `.env` checked in; ephemeral on the box.
 
 ### 6.4 Backups
 
@@ -481,3 +741,163 @@ The MVP tests *protocol viability*. It does not test whether Murmur is a good bu
 - **Demo-to-product gap.** What's the next 100 hours of work after a successful demo, and is that path obviously achievable? Currently undefined. A realistic milestone-2 sketch (e.g., "second external publisher signed, basic discovery surface, billing prototype") would clarify whether the MVP is a foundation or a one-off.
 
 These risks don't block the MVP; they decide whether the MVP becomes a project. Recommended pre-investment: 2–3 publisher conversations and 1–2 agent-owner conversations before committing the next phase of work.
+
+---
+
+## 9. ws → Murmur coverage matrix
+
+Constraint: the ws→Murmur reimplementation must not lose any ws functionality. This section enumerates every ws capability and maps it to its Murmur destination. **Replaced** = different mechanism, same outcome. **Hosted** = exposed as a Murmur subtask or subcommand. **Cut** = explicitly out of scope, with a mitigation.
+
+**A "Hosted" status here means "in the spec," NOT "ready for the demo."** Many Hosted rows depend on mechanisms that are deferred from demo-minimum (`spawns`, `skip_if`, `prior_outputs`, `blocked`, `status`, `claim_closed`, KB endpoints). The full demo-vs-full split lives in §5.2; this matrix is about end-state coverage, not delivery sequencing. Treat any Hosted row whose mechanism is ⊘ in §5.2 as "post-demo."
+
+### 9.1 CLI surface (every `ws <cmd>`)
+
+**Workspace lifecycle:**
+
+| ws | Murmur destination | Status |
+|---|---|---|
+| `ws new <slug> --issue N` | `POST /pipelines/jobseek-add-company/runs` (jobseek's `requestCompany` wrapper) | Replaced |
+| `ws new ... --reconfig` | `POST /pipelines/.../runs` with `prior_outputs: { ... }` (§3.2) | Hosted |
+| `ws search "<q>"` | `task_tool('search companies', { q })` subcommand on `pre-verify` | Hosted |
+| `ws use <slug>` | Implicit; the agent works on whatever `pull_task` returns | Replaced |
+| `ws status` | `task_tool('status')` (§3.4) | Hosted |
+| `ws validate` | jobseek's `inspect.py` runs in the accept handler before applying | Replaced |
+| `ws resume` | `task_tool('status')` after reconnect; claims survive reconnect (§3.3) | Hosted |
+| `ws submit` | Automatic at run-completion (all subtasks valid) | Replaced |
+| `ws reject --reason ...` (whole-run reject) | `pre-verify.verified=false` with `reject_reason` enum (matches ws's reasons: duplicate, not-a-company, company-not-found, no-job-board, no-open-positions, subsidiary). Subsidiary case sets `parent_slug` so the accept handler can queue a fresh run for the parent. Downstream subtasks short-circuit via `skip_if`. | Replaced |
+| `ws del [slug]` | Operator declines the run in jobseek; Murmur sweeps via TTL | Replaced |
+| `ws help` | KB browsing as a subcommand: `task_tool('help <topic>')` | Hosted |
+
+**Board management:**
+
+| ws | Murmur destination | Status |
+|---|---|---|
+| `ws add board <alias> --url ...` | Encoded in `list-boards` output | Hosted |
+| `ws add boards <urls...>` | Encoded in `list-boards` output | Hosted |
+| `ws set --name/--website/--logo/--description/...` | Encoded in `setup-metadata` output | Hosted |
+| `ws set --logo-candidate N / --icon-candidate N` | Subcommands on `setup-metadata`: `list logo candidates`, then chosen URL goes in output | Hosted |
+| `ws del board <alias>` | Agent omits the board from `list-boards` output. To remove a board after `configure-board` has run for it: `task_tool('blocked', ...)` + publisher reissues run with adjusted `prior_outputs`. | Hosted |
+
+**Probing / running / selecting (per board):**
+
+| ws | Murmur destination | Status |
+|---|---|---|
+| `ws probe monitor -n N` | `task_tool('probe monitor', { board_url, expected_count })` on `configure-board` | Hosted |
+| `ws probe scraper` | `task_tool('probe scraper', { board_url, sample_urls })` | Hosted |
+| `ws probe deep -n N` | `task_tool('probe deep', { board_url })` (Playwright api_sniffer detection) | Hosted |
+| `ws probe api <url>` | `task_tool('probe api', { url })` (single-API analysis) | Hosted |
+| `ws select monitor <type> [--as] [--config]` | `task_tool('select monitor', { type, name, config })` (state lives in subcommand server, not Murmur) | Hosted |
+| `ws select scraper <type> [--as] [--config]` | `task_tool('select scraper', { ... })` | Hosted |
+| `ws select config <name>` | `task_tool('select config', { name })` | Hosted |
+| `ws reject-config <name> --reason` | `task_tool('reject-config', { name, reason })` | Hosted |
+| `ws run monitor [--config]` | `task_tool('run monitor', { ... })` | Hosted |
+| `ws run scraper [--url ... --config]` | `task_tool('run scraper', { ... })` | Hosted |
+| `ws compare-boards` | jobseek's accept handler runs the same logic on `final_output` (against per-run boards plus existing catalog rows for reconfig). Drops MIRROR/SUBSET/PHANTOM/PARENT-PORTAL/UNSUPPORTED outcomes; keeps OVERLAP with annotation. See §4.2. | Replaced (publisher-side) |
+
+**Feedback / synchronization / workflow control:**
+
+| ws | Murmur destination | Status |
+|---|---|---|
+| `ws feedback --verdict --per-field ... --notes` | `task_tool('feedback', { ... })` then encoded in `configure-board` output (verdict, per_field) | Hosted |
+| `ws await-board` / `ws boards-done` | Replaced by `list-boards` returning the full board set; no parallel discovery primitive in MVP. Post-MVP: revisit if real publishers need it (see §5 forward-compatibility note). | Replaced (with caveat) |
+| `ws task` (show step instructions) | `instructions` returned by `pull_task` | Replaced |
+| `ws task next --notes "<reflection>"` | `submit_result(claim, result, notes?)` — explicit `notes` parameter (§3.1). Persists in audit. | Replaced |
+| `ws task back --to <step> --reason` | `task_tool('blocked', { reason })` + publisher issues fresh run with `prior_outputs` for keepers (no native rewind in Murmur — see §3.4). | Replaced |
+| `ws task fail --reason` | `task_tool('blocked', { reason })` (§3.4) | Hosted |
+| `ws task complete` | Automatic at last subtask submit | Replaced |
+| `ws task status` | `task_tool('status')` | Hosted |
+| `ws task troubleshoot <q>` | `task_tool('kb search', { q })` | Hosted |
+| `ws task learn ...` | Universal optional `kb_entries` array on any subtask's output (§3.1). Murmur aggregates across subtasks into `final_output.kb_entries`; accept handler ingests. | Replaced |
+| `ws task casestudy ...` | Universal optional `case_studies` array on any subtask's output (§3.1). Aggregated into `final_output.case_studies`; accept handler ingests. | Replaced |
+
+**Taxonomy / discovery / utilities:**
+
+| ws | Murmur destination | Status |
+|---|---|---|
+| `ws taxonomy search <name> <q>` | `task_tool('taxonomy search', { ... })` on `setup-metadata` | Hosted |
+| `ws taxonomy validate <name>` | jobseek's accept handler validates final output; no agent-time taxonomy mutation | Replaced |
+| `ws taxonomy add <name> --en --de --fr --it` | Out of agent scope; operator-only (jobseek admin UI). | Cut for agents (operator path unchanged) |
+| `ws discover <slug>` (foreground) | `task_tool('discover company', { website })` | Hosted |
+| `ws discover-bg <slug>` | Async kicked off by `task_tool('discover company', ...)`; results polled via `task_tool('list logo candidates')` | Hosted |
+| `ws logos <slug>` | `task_tool('list logo candidates')` | Hosted |
+
+### 9.2 Workflow steps (00–07 + fail mode)
+
+| ws step | Murmur subtask(s) |
+|---|---|
+| 00 pre-verify | `pre-verify` |
+| 01 setup | `setup-metadata` |
+| 02 add-boards | `list-boards` (returns boards array; spawns per-board children) |
+| 03 select-monitor | inside `configure-board` (subcommands) |
+| 04 select-scraper | inside `configure-board` (subcommands; `skip_if` on auto-config monitors) |
+| 05 verify-and-feedback | inside `configure-board` (the `verdict` + `per_field` outputs) |
+| 06 submit | automatic on run-completion |
+| 07 reflect | per-subtask optional `kb_entries` / `case_studies` outputs flattened into `final_output` (no dedicated reflect subtask) |
+| fail-mode | `task_tool('blocked', ...)` then operator triage |
+
+### 9.3 State / artifacts
+
+| ws artifact | Murmur destination |
+|---|---|
+| `.workspace/<slug>/workspace.yaml` | run row + per-subtask result rows |
+| `.workspace/<slug>/workflow.yaml` | run row (current_subtask, completed_subtasks) |
+| `.workspace/<slug>/log.yaml` | per-subtask `agent_actions[]` in audit log |
+| `.workspace/<slug>/boards/<alias>.yaml` | each `configure-board` instance's result row |
+| `.workspace/<slug>/artifacts/` (logos, probe results) | publisher-side; agents reference via subcommand returns |
+| `companies.csv` / `boards.csv` row append | jobseek's accept handler writes to local Postgres on webhook delivery (jobseek migrating catalog off CSV+git; §4.2). |
+| Git branch / worktree / draft PR | replaced by run state in Murmur |
+
+### 9.4 Side effects
+
+| ws side effect | Murmur destination |
+|---|---|
+| GitHub issue claim/unclaim/comment/close | replaced (run states + jobseek admin UI) |
+| Git branch / commit / push / PR | replaced (Murmur run state + accept-handler writes) |
+| Live HTTP probes | publisher subcommand endpoints |
+| Live monitor / scraper crawls | publisher subcommand endpoints |
+| Logo discovery (Google/Wikipedia/Wikidata) | publisher `discover company` subcommand (kicks off async, polled) |
+| CSV finalization | jobseek's accept handler |
+| Trace export to Hugging Face | jobseek's accept handler reads `GET /runs/{id}` audit, uploads |
+| KB writes (`kb/*.md`) | Each subtask explicitly declares optional `kb_entries` / `case_studies` arrays in its `outputs` (§3.1). The pipeline's `final_output.composes` rule flattens them; jobseek's accept handler ingests into local Postgres KB. No agent-time HTTP write, no git commit, no operator-curated `kb_pending` queue, no dedicated reflect subtask. Same final outcome as ws today; cleaner mechanism. |
+
+### 9.5 Quality / safety machinery
+
+| ws machinery | Murmur destination |
+|---|---|
+| Preflight checks (branch/PR consistency) | not needed (no git) |
+| Workflow gates (state-based) | replaced by `output_schema` validation + `skip_if` |
+| Idempotent `ws new` | `POST /pipelines/.../runs` with `Idempotency-Key: <publisher-side-key>` (publisher concern) |
+| Stale worktree cleanup | not needed |
+| CSV conflict resolution | not needed (accept handler is the only writer) |
+| Stuck-PR reclaim (oldest-issue selection) | claim TTL + sweeper (§3.3) |
+| Issue claim (prevent duplicate processing) | claim model (one active claim per session, §3.3) |
+| Budget caps (`BUDGET_PER_5H` in resolve-company-requests.yml) | jobseek's cron applies its own budget when triggering runs; Murmur doesn't enforce |
+| Anti-flapping git retries | not needed |
+| Validation (`inspect.py`) | runs in accept handler before applying |
+
+### 9.6 Knowledge content
+
+| ws content | Murmur destination |
+|---|---|
+| `steps/*.md` | `instructions` field in pipeline def |
+| `kb/*.md` (107 entries) | served via `task_tool('kb search', ...)` / `task_tool('kb view', ...)` subcommands; backed by jobseek's local Postgres after the catalog migration (§4.2). |
+| `commands/help.py` topics | served via `task_tool('help <topic>')` subcommand |
+| Per-monitor / per-scraper docs | served as KB topics |
+| Parallel step templates (`steps/parallel/*.md`) | not needed for MVP (no parallel branches); revisit post-MVP if real |
+
+### 9.7 Local mode and dev ergonomics
+
+| ws | Murmur destination |
+|---|---|
+| `WS_LOCAL=1` (skip git/GitHub) | not needed (no git/GitHub in Murmur). Local dev: run Murmur server + jobseek's subcommand server locally; point Claude Code's MCP at localhost. |
+| `ws artifacts` | publisher side; subcommand returns include artifact references |
+
+### 9.8 Genuine acknowledged losses (with mitigation)
+
+Items where the ws → Murmur port reduces capability *and* mitigation isn't free:
+
+1. **Concurrent per-board parallelism (Track A/B/C).** ws supports parallel discovery via three subagents; Murmur's MVP processes a run sequentially. *Mitigation:* the protocol's `requires` field already permits siblings without ordering constraints (§3.1); enabling concurrent claims for a single run is a post-MVP server change, not a protocol change. Acceptable cost: longer wall-clock for first run on companies with many boards.
+2. **`ws use` multi-workspace switching for one human.** ws lets one developer juggle multiple companies in flight. Murmur expects one active claim per agent session. *Mitigation:* developers run multiple Claude Code sessions, one per claim. No real loss for agent users (each agent does one thing at a time anyway); minor friction for a single human handling many.
+3. **Direct CSV mutation by humans for emergencies.** Devs editing CSVs directly is the documented escape hatch (§4.2). Unchanged.
+
+Nothing else from the audit is lost. If implementation reveals further gaps, the mitigation is to extend Murmur's protocol primitives or jobseek's subcommand surface, not to rebuild ws.
