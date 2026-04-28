@@ -54,10 +54,50 @@ Role definitions: `.claude/agents/orchestrator.md`, `.claude/agents/developer.md
 ## Branch protection (configured manually)
 
 `main` requires:
-- 1 reviewer approval (the agent reviewer counts; configure as required check on agent's status)
-- All CI checks pass
+- All CI checks pass (`quality` job)
 - No merge conflicts
 - Squash merge only
+- (Optional, post-bootstrap) 1 reviewer approval — note that GitHub forbids self-review, so if the orchestrator opens the PR under the same identity, branch protection with required reviews will block its own merges. Either configure with `required_approving_review_count: 0` and rely on CI + reviewer-agent comments, or use a separate bot identity for the orchestrator.
+
+Apply with:
+
+```bash
+gh api -X PUT repos/colophon-group/murmur/branches/main/protection \
+  -f required_status_checks.strict=true \
+  -f 'required_status_checks.contexts[]=quality' \
+  -F enforce_admins=true \
+  -F required_pull_request_reviews.required_approving_review_count=0 \
+  -F restrictions=
+```
+
+## One-time agent bootstrap (per developer machine)
+
+Before the orchestrator can spawn developers/reviewers cleanly:
+
+1. **SSH config for the Hetzner box** — append to `~/.ssh/config`:
+
+   ```
+   Host murmur
+     HostName 178.105.51.62
+     User deploy
+     IdentityFile ~/.ssh/hetzner_deploy
+     BatchMode yes
+     StrictHostKeyChecking accept-new
+   ```
+
+   Test with `ssh murmur 'echo ok'`.
+
+2. **Lefthook + cloudflared** — needed for pre-commit hooks and tunnel ops:
+
+   ```bash
+   brew install lefthook cloudflared
+   ```
+
+   In the repo: `lefthook install` (creates `.git/hooks/`).
+
+3. **`gh` auth** — agents use `gh` for issue/PR ops. Verify with `gh auth status`. Required scopes: `repo`, `workflow`, `read:org`. To set environment secrets (used by D2 deploy), `repo` is sufficient.
+
+4. **Permissions check** — `cat .claude/settings.json` should include `additionalDirectories: ["/Users/Viktor/jobseek"]` so Edit/Write on jobseek paths works.
 
 ## Cross-repo coordination
 

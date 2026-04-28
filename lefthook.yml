@@ -1,36 +1,66 @@
 # lefthook — pre-commit + pre-push hooks. Install: `lefthook install`.
+#
+# Design choices:
+# - typecheck runs pre-push (full project tsc on every commit was a `--no-verify` magnet)
+# - lint --fix and prettier run pre-commit on staged files only
+# - grep gates run pre-commit (cheap, full-tree by design)
+# - full test suite runs pre-push, skipped on docs-only changes
+# - stage_fixed: true lets lefthook re-stage formatter changes safely (preserves partial staging)
 
 pre-commit:
   parallel: true
   commands:
-    typecheck:
-      glob: "*.{ts,tsx}"
-      run: |
-        if [ -f pnpm-lock.yaml ]; then pnpm typecheck; fi
-
     lint:
       glob: "*.{ts,tsx,js,jsx}"
       run: |
-        if [ -f pnpm-lock.yaml ]; then pnpm lint --fix {staged_files} || true; fi
-
-    grep-no-token-logged:
-      run: bash scripts/grep-no-token-logged.sh
-
-    grep-no-accepted-key:
-      run: bash scripts/grep-no-accepted-key.sh
+        if command -v pnpm >/dev/null && [ -f pnpm-lock.yaml ]; then
+          pnpm exec eslint --fix {staged_files}
+        else
+          echo "skip: pnpm or lockfile not present (pre-M1)"
+        fi
+      stage_fixed: true
+      skip:
+        run: test -z "{staged_files}"
 
     prettier:
       glob: "*.{ts,tsx,js,jsx,json,md,yml,yaml}"
       run: |
-        if [ -f pnpm-lock.yaml ] && [ -f .prettierrc ]; then
-          pnpm prettier --write {staged_files} && git add {staged_files}
+        if command -v pnpm >/dev/null && [ -f pnpm-lock.yaml ] && [ -f .prettierrc ]; then
+          pnpm exec prettier --write {staged_files}
+        else
+          echo "skip: prettier not configured yet"
         fi
+      stage_fixed: true
+      skip:
+        run: test -z "{staged_files}"
+
+    grep-all:
+      run: bash scripts/grep-all.sh
 
 pre-push:
+  parallel: true
   commands:
+    typecheck:
+      run: |
+        if command -v pnpm >/dev/null && [ -f pnpm-lock.yaml ]; then
+          pnpm typecheck
+        else
+          echo "skip: pnpm or lockfile not present (pre-M1)"
+        fi
+
     test:
       run: |
-        if [ -f pnpm-lock.yaml ]; then pnpm test; fi
+        if ! command -v pnpm >/dev/null || [ ! -f pnpm-lock.yaml ]; then
+          echo "skip: pnpm or lockfile not present (pre-M1)"
+          exit 0
+        fi
+        # Skip full test on docs-only pushes (anything outside *.md / docs/)
+        changed=$(git diff --name-only $(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1)...HEAD || true)
+        if [ -n "$changed" ] && ! echo "$changed" | grep -qvE '^(docs/|.*\.md$)'; then
+          echo "skip: docs-only push"
+          exit 0
+        fi
+        pnpm test
 
     grep-all:
       run: bash scripts/grep-all.sh
@@ -39,6 +69,7 @@ commit-msg:
   commands:
     conventional:
       run: |
-        # Loose convention check: warn (don't block) on non-conventional messages
+        # Loose convention check: warn (don't block) on non-conventional messages.
+        # Squash-merge replaces the message with the PR title anyway.
         head -1 "{1}" | grep -qE '^(feat|fix|refactor|docs|test|chore|build|ci|perf|style)(\(.+\))?!?: .{1,}$' \
           || echo "warning: commit message does not follow conventional commits (non-blocking)"

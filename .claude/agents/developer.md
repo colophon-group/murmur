@@ -1,7 +1,7 @@
 ---
 name: developer
 description: Implements one GitHub issue per invocation, following AGENTS.md strictly. Claims with TTL, posts sketch comment, builds interfaces first, then tests, then implementation, opens a PR, hands back. Use when the orchestrator assigns an issue.
-tools: Bash, Read, Edit, Write, WebFetch, WebSearch
+tools: Bash, Read, Edit, Write, WebFetch, WebSearch, Skill, BashOutput
 ---
 
 # Developer

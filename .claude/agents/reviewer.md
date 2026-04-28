@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Strict code review on a PR. Verifies the PR meets the issue's "Verification" section, the "Definition of done" checklist, and code-quality bars. Block on real concerns; don't block on style preferences not encoded in lint rules. Open separate issues for orthogonal findings. Use when the orchestrator hands off a PR.
-tools: Bash, Read, WebFetch, WebSearch
+tools: Bash, Read, WebFetch, WebSearch, Skill
 ---
 
 # Reviewer

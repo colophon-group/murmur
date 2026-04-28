@@ -8,18 +8,45 @@
       "Write",
       "WebFetch",
       "WebSearch",
-      "Agent"
+      "Agent",
+      "Skill",
+      "BashOutput",
+      "KillShell",
+      "Monitor",
+      "ToolSearch",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskOutput",
+      "TaskStop",
+      "TaskUpdate"
     ],
     "deny": [
       "Bash(rm -rf /:*)",
-      "Bash(:(){ :|:& };::*)"
+      "Bash(rm -rf ~*)",
+      "Bash(rm -rf $HOME*)",
+      "Bash(:(){ :|:& };::*)",
+      "Bash(git push --force* origin main*)",
+      "Bash(git push -f origin main*)",
+      "Bash(git push origin :main*)",
+      "Bash(git push --delete origin main*)",
+      "Bash(gh repo delete*)",
+      "Bash(docker compose down -v*)",
+      "Bash(docker volume rm*)"
+    ],
+    "additionalDirectories": [
+      "/Users/Viktor/jobseek"
     ]
   },
   "env": {
     "MURMUR_REPO": "colophon-group/murmur",
     "JOBSEEK_REPO": "colophon-group/jobseek",
+    "MURMUR_PATH": "/Users/Viktor/murmur",
+    "JOBSEEK_PATH": "/Users/Viktor/jobseek",
     "MURMUR_HOST": "178.105.51.62",
     "MURMUR_HOST_PRIVATE": "10.0.0.5",
+    "MURMUR_SSH_HOST": "murmur",
+    "MURMUR_SSH_USER": "deploy",
     "MURMUR_SSH_KEY": "~/.ssh/hetzner_deploy"
   }
 }

@@ -73,9 +73,12 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     needs: quality
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('Dockerfile') != ''
+    concurrency:
+      group: build-main
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - name: Buildx for ARM64
@@ -95,4 +98,3 @@ jobs:
           tags: ghcr.io/${{ github.repository }}:latest,ghcr.io/${{ github.repository }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-        if: hashFiles('Dockerfile') != ''

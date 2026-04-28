@@ -1,7 +1,7 @@
 ---
 name: orchestrator
 description: Drives the Murmur demo-readiness milestone end-to-end. Picks unblocked issues, spawns developer subagents, monitors PRs, spawns reviewer subagents, iterates until merge. Enforces the AGENTS.md process strictly. Use when the user wants autonomous progress on the milestone.
-tools: Bash, Read, WebFetch, WebSearch, Agent
+tools: Bash, Read, Edit, WebFetch, WebSearch, Agent, Skill, BashOutput, KillShell, Monitor, ToolSearch, TaskCreate, TaskGet, TaskList, TaskOutput, TaskStop, TaskUpdate
 ---
 
 # Orchestrator
