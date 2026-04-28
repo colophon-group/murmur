@@ -539,7 +539,12 @@ Implementing demo-minimum first, then layering the rest, is the recommended orde
 
 What gets built where to make the §2 demo run end-to-end. Items marked ⊘ are full-coverage features deliberately deferred from the demo path. Items marked ✓ must ship before the demo.
 
-**Implementation tracking:** the work below is broken down into 33 issues under the [Demo readiness milestone](https://github.com/colophon-group/murmur/milestone/1). 5 epic issues (#1-5), 28 detail issues (M1-M12 Murmur core, D1-D5 deploy, J1-J5 jobseek subcommands, P1-P4 pipeline + accept, R1-R2 rehearsal). Labels: `area:murmur` / `area:jobseek`, `type:feature` / `type:infra` / `type:rehearsal` / `type:epic`.
+**Implementation tracking:** the work below is split across two GH repos:
+
+- **Murmur side** — [colophon-group/murmur milestone "Demo readiness"](https://github.com/colophon-group/murmur/milestone/1): 3 epics (#1, #2, #5), 19 detail issues (M1-M12, D1-D5, R1-R2)
+- **Jobseek side** — [colophon-group/jobseek milestone "Murmur demo readiness"](https://github.com/colophon-group/jobseek/milestone/1): 2 epics (#2753, #2754), 9 detail issues (J1-J5, P1-P4)
+
+Each issue has an explicit "Verification" section with named test files, specific assertions, manual-check commands, and quality gates a reviewer can run. Definition-of-done checklists are merge-required.
 
 **In the Murmur package** (`/Users/Viktor/murmur`):
 
