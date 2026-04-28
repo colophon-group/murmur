@@ -19,7 +19,9 @@ build/
 .DS_Store
 
 # Claude / AI
-.claude/
+.claude/*
+!.claude/agents/
+!.claude/settings.json
 .mcpregistry_*
 
 # Local SQLite + WAL files (when running locally)

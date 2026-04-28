@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "WebSearch",
+      "Agent"
+    ],
+    "deny": [
+      "Bash(rm -rf /:*)",
+      "Bash(:(){ :|:& };::*)"
+    ]
+  },
+  "env": {
+    "MURMUR_REPO": "colophon-group/murmur",
+    "JOBSEEK_REPO": "colophon-group/jobseek",
+    "MURMUR_HOST": "178.105.51.62",
+    "MURMUR_HOST_PRIVATE": "10.0.0.5",
+    "MURMUR_SSH_KEY": "~/.ssh/hetzner_deploy"
+  }
+}

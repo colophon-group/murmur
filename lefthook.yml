@@ -1,0 +1,44 @@
+# lefthook — pre-commit + pre-push hooks. Install: `lefthook install`.
+
+pre-commit:
+  parallel: true
+  commands:
+    typecheck:
+      glob: "*.{ts,tsx}"
+      run: |
+        if [ -f pnpm-lock.yaml ]; then pnpm typecheck; fi
+
+    lint:
+      glob: "*.{ts,tsx,js,jsx}"
+      run: |
+        if [ -f pnpm-lock.yaml ]; then pnpm lint --fix {staged_files} || true; fi
+
+    grep-no-token-logged:
+      run: bash scripts/grep-no-token-logged.sh
+
+    grep-no-accepted-key:
+      run: bash scripts/grep-no-accepted-key.sh
+
+    prettier:
+      glob: "*.{ts,tsx,js,jsx,json,md,yml,yaml}"
+      run: |
+        if [ -f pnpm-lock.yaml ] && [ -f .prettierrc ]; then
+          pnpm prettier --write {staged_files} && git add {staged_files}
+        fi
+
+pre-push:
+  commands:
+    test:
+      run: |
+        if [ -f pnpm-lock.yaml ]; then pnpm test; fi
+
+    grep-all:
+      run: bash scripts/grep-all.sh
+
+commit-msg:
+  commands:
+    conventional:
+      run: |
+        # Loose convention check: warn (don't block) on non-conventional messages
+        head -1 "{1}" | grep -qE '^(feat|fix|refactor|docs|test|chore|build|ci|perf|style)(\(.+\))?!?: .{1,}$' \
+          || echo "warning: commit message does not follow conventional commits (non-blocking)"
