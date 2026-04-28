@@ -1,0 +1,45 @@
+# Local env
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+.turbo/
+.next/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Claude / AI
+.claude/
+.mcpregistry_*
+
+# Local SQLite + WAL files (when running locally)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Coverage
+coverage/
+*.lcov
+
+# Secrets / certs
+*.pem
+*.key
