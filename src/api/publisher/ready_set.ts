@@ -57,7 +57,14 @@ export interface ReadyRow {
  * @returns the set of spawn-template subtask ids (lookup-friendly).
  */
 export function spawnTemplateIds(def: PipelineDef): ReadonlySet<string> {
-  throw new Error("not implemented");
+  const ids = new Set<string>();
+  for (const subtask of def.subtasks) {
+    const spawns = subtask.spawns;
+    if (spawns !== undefined) {
+      ids.add(spawns.template);
+    }
+  }
+  return ids;
 }
 
 /**
@@ -74,8 +81,8 @@ export function spawnTemplateIds(def: PipelineDef): ReadonlySet<string> {
  * `initial_input` is the conservative choice and matches what the
  * agent will see in `pull_task` until M6 wires per-subtask resolution.
  *
- * The function does NOT mint instance ids or touch the DB; it returns
- * data the caller will insert inside its run-creation transaction.
+ * The function does NOT touch the DB; it returns data the caller will
+ * insert inside its run-creation transaction.
  *
  * @param def the validated pipeline definition.
  * @param runId the freshly-minted run id.
@@ -94,5 +101,22 @@ export function computeReadySet(
   now: string,
   mintInstanceId: () => string,
 ): ReadonlyArray<ReadyRow> {
-  throw new Error("not implemented");
+  const templates = spawnTemplateIds(def);
+  const inputJson = JSON.stringify(initialInput);
+  const rows: ReadyRow[] = [];
+  for (const subtask of def.subtasks) {
+    if (templates.has(subtask.id)) continue;
+    const requires = subtask.requires ?? [];
+    if (requires.length > 0) continue;
+    rows.push({
+      id: mintInstanceId(),
+      run_id: runId,
+      subtask_id: subtask.id,
+      status: "ready",
+      input_json: inputJson,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return rows;
 }

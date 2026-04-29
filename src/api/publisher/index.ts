@@ -19,6 +19,9 @@
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 
+import { mountPipelineRoutes } from "./pipelines.js";
+import { mountRunRoutes } from "./runs.js";
+
 /**
  * Options accepted by {@link createPublisherApp}.
  */
@@ -41,12 +44,8 @@ export interface CreatePublisherAppOptions {
  *   carry their own absolute-style paths under `/`).
  */
 export function createPublisherApp(options: CreatePublisherAppOptions): Hono {
-  // Sub-app composition; the actual route bodies live in the sibling
-  // modules. Each `mount*` function attaches its routes to this Hono
-  // instance.
   const app = new Hono();
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- wired by mount fns once interfaces are filled in
-  const _db = options.db;
-  // Implementations land in step 6.
+  mountPipelineRoutes(app, options.db);
+  mountRunRoutes(app, options.db);
   return app;
 }

@@ -14,17 +14,19 @@
  * @see DESIGN.md §3.2 — POST /pipelines
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+
 /**
- * The parsed pipeline-def JSON Schema document. Stable reference; the
- * runtime cache in `src/dispatch/validation.ts` is keyed by reference,
- * so re-loading on every request would defeat the cache.
- *
- * Type is `object` because the schema has many nested fields the
- * publisher API does not depend on directly — Ajv consumes it as a
- * generic JSON Schema document.
+ * Resolve `docs/contracts/pipeline-def.schema.json` relative to the
+ * package root. This file lives at `src/api/publisher/schema.ts`, so
+ * three `..` segments climb out to the package root.
  */
-export const PIPELINE_DEF_SCHEMA: Readonly<Record<string, unknown>> =
-  loadPipelineDefSchema();
+function schemaPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, "..", "..", "..", "docs", "contracts", "pipeline-def.schema.json");
+}
 
 /**
  * Internal loader — exported only for testing. Reads
@@ -33,5 +35,20 @@ export const PIPELINE_DEF_SCHEMA: Readonly<Record<string, unknown>> =
  * deployment misconfiguration).
  */
 export function loadPipelineDefSchema(): Readonly<Record<string, unknown>> {
-  throw new Error("not implemented");
+  const raw = readFileSync(schemaPath(), "utf8");
+  const parsed = JSON.parse(raw) as unknown;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `loadPipelineDefSchema: ${schemaPath()} did not parse to a JSON object`,
+    );
+  }
+  return parsed as Readonly<Record<string, unknown>>;
 }
+
+/**
+ * The parsed pipeline-def JSON Schema document. Stable reference; the
+ * runtime cache in `src/dispatch/validation.ts` is keyed by reference,
+ * so re-loading on every request would defeat the cache.
+ */
+export const PIPELINE_DEF_SCHEMA: Readonly<Record<string, unknown>> =
+  loadPipelineDefSchema();

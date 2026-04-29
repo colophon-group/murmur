@@ -266,6 +266,38 @@ final_output:
     }
   });
 
+  it("rejects non-string def_yaml with 400", async () => {
+    const response = await server.app.request("/pipelines", {
+      method: "POST",
+      headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "x", def_yaml: 42 }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects YAML that parses to a non-object with 400", async () => {
+    const response = await server.app.request("/pipelines", {
+      method: "POST",
+      headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+      // Parses to the bare string "scalar".
+      body: JSON.stringify({ id: "x", def_yaml: "scalar" }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as EnvelopeResponse<unknown>;
+    expect(body.ok).toBe(false);
+  });
+
+  it("rejects non-JSON request body with 400", async () => {
+    const response = await server.app.request("/pipelines", {
+      method: "POST",
+      headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+      body: "not-json",
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as EnvelopeResponse<unknown>;
+    expect(body.ok).toBe(false);
+  });
+
   it("returns 401 without an Authorization header (auth wired to publisher routes)", async () => {
     const response = await server.app.request("/pipelines", {
       method: "POST",
@@ -327,6 +359,18 @@ describe("POST /pipelines/{id}/runs", () => {
         .join("\n");
       expect(joined).toMatch(/^validation:/m);
     }
+  });
+
+  it("returns 400 when the run body is not valid JSON", async () => {
+    const response = await server.app.request(
+      "/pipelines/jobseek-add-company/runs",
+      {
+        method: "POST",
+        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+        body: "{not json",
+      },
+    );
+    expect(response.status).toBe(400);
   });
 
   it("returns 200 { run_id } and creates the right ready-set rows on valid input", async () => {

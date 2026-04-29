@@ -62,5 +62,28 @@ export function truncatePayload(
   json: string | null,
   capBytes: number,
 ): TruncatedPayload {
-  throw new Error("not implemented");
+  if (json === null) {
+    return { text: null, truncated: false };
+  }
+
+  // Fast path: most rows are within cap. Use Buffer.byteLength to count
+  // UTF-8 bytes without allocating an intermediate buffer.
+  const byteLen = Buffer.byteLength(json, "utf8");
+  if (byteLen <= capBytes) {
+    return { text: json, truncated: false };
+  }
+
+  // Slow path: clip to exactly `capBytes` bytes, never splitting a
+  // multi-byte UTF-8 sequence. We construct a Buffer view and decode
+  // with `TextDecoder({ fatal: false })`; the decoder will replace a
+  // dangling continuation byte with U+FFFD, but we want to drop trailing
+  // partial sequences entirely. Easiest way: decode permissively, then
+  // strip any trailing replacement char.
+  const buf = Buffer.from(json, "utf8");
+  const slice = buf.subarray(0, capBytes);
+  // `TextDecoder` with `fatal: false` is the default; trailing partials
+  // become U+FFFD. Trim them off.
+  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(slice);
+  const cleaned = decoded.replace(/�+$/u, "");
+  return { text: `${cleaned}${TRUNCATION_MARKER}`, truncated: true };
 }

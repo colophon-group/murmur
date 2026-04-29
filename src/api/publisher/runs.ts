@@ -13,6 +13,13 @@
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
 
+import type { Err, Ok } from "@murmur/contracts-types";
+
+import {
+  AGENT_ACTION_PAYLOAD_CAP_BYTES,
+  truncatePayload,
+} from "./truncate.js";
+
 /**
  * One audit-log entry returned in `GET /runs/{run_id}`.
  *
@@ -46,6 +53,28 @@ export interface RunStatusView {
   readonly agent_actions: ReadonlyArray<AgentActionView>;
 }
 
+/** Shape of the `runs` row we read. */
+interface RunRow {
+  readonly id: string;
+  readonly pipeline_id: string;
+  readonly pipeline_version: number;
+  readonly status: string;
+  readonly final_output_json: string | null;
+}
+
+/** Shape of the joined `agent_actions` row we read. */
+interface AgentActionRow {
+  readonly id: number;
+  readonly instance_id: string;
+  readonly subtask_id: string;
+  readonly ts: string;
+  readonly kind: string;
+  readonly subcommand: string | null;
+  readonly args_json: string | null;
+  readonly response_json: string | null;
+  readonly truncated: number;
+}
+
 /**
  * Mount the `GET /runs/{run_id}` route onto the given Hono sub-app.
  *
@@ -58,5 +87,75 @@ export interface RunStatusView {
  * @param db the open SQLite handle.
  */
 export function mountRunRoutes(app: Hono, db: Database.Database): void {
-  throw new Error("not implemented");
+  const selectRun = db.prepare(
+    `SELECT id, pipeline_id, pipeline_version, status, final_output_json
+       FROM runs WHERE id = ?`,
+  );
+  // Join through subtask_instances so the audit row carries `subtask_id`
+  // — agent_actions itself only knows `instance_id`.
+  const selectActions = db.prepare(
+    `SELECT a.id, a.instance_id, i.subtask_id, a.ts, a.kind, a.subcommand,
+            a.args_json, a.response_json, a.truncated
+       FROM agent_actions a
+       JOIN subtask_instances i ON i.id = a.instance_id
+      WHERE i.run_id = ?
+      ORDER BY a.id ASC`,
+  );
+
+  app.get("/runs/:run_id", (c) => {
+    const runId = c.req.param("run_id");
+    if (runId === undefined || runId === "") {
+      const err: Err = { ok: false, errors: ["run_id_required"] };
+      return c.json(err, 400);
+    }
+    const row = selectRun.get(runId) as RunRow | undefined;
+    if (row === undefined) {
+      const err: Err = { ok: false, errors: ["run_not_found"] };
+      return c.json(err, 404);
+    }
+
+    const actionRows = selectActions.all(runId) as ReadonlyArray<AgentActionRow>;
+    const agent_actions: AgentActionView[] = [];
+    for (const a of actionRows) {
+      const args = truncatePayload(a.args_json, AGENT_ACTION_PAYLOAD_CAP_BYTES);
+      const resp = truncatePayload(
+        a.response_json,
+        AGENT_ACTION_PAYLOAD_CAP_BYTES,
+      );
+      agent_actions.push({
+        id: a.id,
+        instance_id: a.instance_id,
+        subtask_id: a.subtask_id,
+        ts: a.ts,
+        kind: a.kind,
+        subcommand: a.subcommand,
+        args_json: args.text,
+        response_json: resp.text,
+        // The DB-side `truncated` flag is set when M5+ writes oversize
+        // payloads (capped at 4 KB); we OR it with our read-time flag so
+        // either kind of truncation surfaces to the caller.
+        truncated:
+          a.truncated > 0 || args.truncated || resp.truncated,
+      });
+    }
+
+    const view: RunStatusView = row.final_output_json !== null
+      ? {
+          run_id: row.id,
+          pipeline_id: row.pipeline_id,
+          pipeline_version: row.pipeline_version,
+          status: row.status,
+          final_output: JSON.parse(row.final_output_json) as unknown,
+          agent_actions,
+        }
+      : {
+          run_id: row.id,
+          pipeline_id: row.pipeline_id,
+          pipeline_version: row.pipeline_version,
+          status: row.status,
+          agent_actions,
+        };
+    const ok: Ok<RunStatusView> = { ok: true, data: view };
+    return c.json(ok, 200);
+  });
 }

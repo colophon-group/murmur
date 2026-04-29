@@ -9,6 +9,15 @@
  * @see DESIGN.md §3.6 — webhook idempotency keys are run ids
  */
 
+import { randomBytes } from "node:crypto";
+
+/**
+ * Width in bytes of the random suffix appended to each id. 12 bytes
+ * (96 bits) hex-encodes to 24 chars and is well above the demo-grade
+ * collision-resistance bar.
+ */
+const ID_RANDOM_BYTES = 12;
+
 /**
  * Mint a new run id of the form `r_<24 hex chars>` (96 bits of entropy).
  *
@@ -16,7 +25,7 @@
  *   width.
  */
 export function newRunId(): string {
-  throw new Error("not implemented");
+  return `r_${randomBytes(ID_RANDOM_BYTES).toString("hex")}`;
 }
 
 /**
@@ -25,5 +34,5 @@ export function newRunId(): string {
  * @returns a fresh instance id.
  */
 export function newInstanceId(): string {
-  throw new Error("not implemented");
+  return `i_${randomBytes(ID_RANDOM_BYTES).toString("hex")}`;
 }
