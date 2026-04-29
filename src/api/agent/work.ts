@@ -3,8 +3,8 @@
  * agent endpoints (DESIGN.md §3.3).
  *
  * Both endpoints use the M0 envelope (`{ ok, errors?, data? }`); there is
- * no `accepted:` parallel shape. Both are mounted by `createAgentApp` in
- * `src/api/agent/index.ts`.
+ * no parallel `accepted` shape (grep-no-accepted-key:allow — prose). Both
+ * are mounted by `createAgentApp` in `src/api/agent/index.ts`.
  *
  * Atomicity rules:
  *
