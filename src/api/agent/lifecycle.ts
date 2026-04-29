@@ -2,29 +2,34 @@
  * Lifecycle helpers for the agent endpoints — runs after a successful
  * submit to advance the pipeline state.
  *
- * For M5 (this PR), the responsibilities are:
+ * Responsibilities:
  *
  *   - **Mark next-ready set** — flip any `pending` subtask_instances on the
- *     same run whose `requires` are now satisfied to `ready`. This is the
- *     deterministic-DAG path; spawn-driven instantiation is M8 territory.
+ *     same run whose `requires` are now satisfied to `ready` (M5).
  *
- * Stubs (not implemented in this PR — referenced for grep-trail):
+ *   - **Spawns** (M8 / issue #13). When the just-completed subtask declares
+ *     `spawns: { for_each, template, bind_as? }`, instantiate one child
+ *     instance per element of the parent's `output[for_each]` array. The
+ *     real work lives in `src/api/agent/spawns.ts`; this module wires it
+ *     into the post-CAS lifecycle.
  *
- *   - **Spawns** (M8 / issue #16). When the just-completed subtask declares
- *     `spawns: { for_each, template }`, instantiate one child instance per
- *     element of the parent's `output[for_each]` array. M5 leaves a TODO
- *     and returns without spawning.
- *
- *   - **Run-completion webhook** (M10 / issue #18). When all of a run's
- *     non-skipped subtasks reach `done`, compose `final_output` per the
- *     pipeline def's `composes:` rules and POST the run to `webhook_url`.
- *     M5 leaves a TODO; the run will sit in `running` until M10 ships.
+ *   - **Run-completion flip** — when every `subtask_instances` row of a
+ *     run is in a terminal state (`done`, `skipped`, or `failed`) and no
+ *     more spawns can fire, flip the run to `status='completed'` and set
+ *     `completed_at`. Webhook delivery and `final_output` composition
+ *     (M10 / M11) remain TODOs; flipping the row to `completed` is the
+ *     deterministic precondition both depend on.
  *
  * @see DESIGN.md §3.1 — `requires`, `spawns`, `composes`
  * @see DESIGN.md §3.3 — claim/CAS lifecycle
+ * @see src/api/agent/spawns.ts — spawn-row insertion
  */
 
 import type Database from "better-sqlite3";
+
+import type { SubtaskDef } from "@murmur/contracts-types";
+
+import { applySpawns } from "./spawns.js";
 
 /**
  * Promote any `pending` subtask_instances on `runId` whose `requires`
@@ -119,46 +124,178 @@ interface PipelineDefForLifecycle {
 }
 
 /**
- * M8 stub — spawn child instances when the just-completed subtask declares
- * `spawns:`. NOT implemented in this PR. See issue #16.
+ * Spawn child `subtask_instances` rows when the just-completed parent's
+ * subtask def declares a `spawns:` block (DESIGN.md §3.1, M8).
  *
- * The function is exported (rather than left as a comment) so the import
- * graph stays stable when M8 lands and so a grep for `spawnChildren` finds
- * the documented stub.
+ * Look up the parent's run id and subtask id from `subtask_instances`,
+ * read the run's pipeline def from `pipelines.def_json`, find the
+ * matching `SubtaskDef`, and delegate to {@link applySpawns}. Returns
+ * the spawned ids in insertion order; an empty result means the parent
+ * had no `spawns` directive, the for_each field was missing, or the
+ * for_each array was empty (issue's edge cases).
+ *
+ * Inserts run on the caller-supplied transaction. The caller (the CAS
+ * submit handler in `src/api/agent/work.ts`) wraps this call in a
+ * `BEGIN IMMEDIATE` so a thrown error rolls back any partial spawn
+ * inserts atomically with the CAS.
+ *
+ * @param db an open better-sqlite3 connection (already inside a txn).
+ * @param parentInstanceId the just-completed parent's instance id.
+ * @param output the parent's submitted, schema-validated result.
+ * @param now an RFC 3339 UTC string (used for child `created_at` /
+ *   `updated_at`).
+ * @param mintInstanceId function called once per spawned row.
+ * @returns the spawned child instance ids in insertion order.
  */
 export function spawnChildren(
   db: Database.Database,
   parentInstanceId: string,
   output: unknown,
   now: string,
+  mintInstanceId: () => string,
 ): ReadonlyArray<string> {
-  void db;
-  void parentInstanceId;
-  void output;
-  void now;
-  // TODO(M8 / colophon-group/murmur#16): instantiate one child per
-  // `output[spawns.for_each]` element, using the `spawns.template` subtask
-  // def. For M5 this is a no-op so the deterministic happy path runs.
-  return [];
+  const parent = lookupParentForSpawn(db, parentInstanceId);
+  if (parent === null) return [];
+
+  const subtaskDef = lookupSubtaskDef(db, parent.run_id, parent.subtask_id);
+  if (subtaskDef === null) return [];
+
+  // Delegate the actual INSERTs. `applySpawns` is a pure-against-the-db
+  // helper: it does not open a transaction, and a thrown SQLite error
+  // (e.g., FK violation) propagates up so the caller's BEGIN IMMEDIATE
+  // can ROLLBACK atomically with the parent's CAS.
+  return applySpawns(
+    db,
+    parentInstanceId,
+    parent.run_id,
+    subtaskDef,
+    output,
+    now,
+    mintInstanceId,
+  );
 }
 
 /**
- * M10 stub — fire the run-completion webhook when all subtasks reach
- * `done`. NOT implemented in this PR. See issue #18.
+ * Flip the run to `completed` when every `subtask_instances` row is in a
+ * terminal state (`done`, `skipped`, or `failed`) AND there are no
+ * `pending`, `ready`, or `claimed` rows left that could still spawn or
+ * advance.
  *
- * Same export-rather-than-comment rationale as `spawnChildren`.
+ * Idempotent: a second call after the row is already `completed` is a
+ * no-op and returns `false`. Composing `final_output` and POSTing the
+ * webhook are deferred to M11 / M10 respectively (issue #18); the row
+ * flip is the deterministic precondition both depend on.
+ *
+ * Inserts run on the caller-supplied transaction. The caller wraps this
+ * in the same `BEGIN IMMEDIATE` as the parent CAS submit so the run
+ * status flip is atomic with the parent's submit.
+ *
+ * @param db an open better-sqlite3 connection (already inside a txn).
+ * @param runId the run to consider.
+ * @param now an RFC 3339 UTC string used for `completed_at`.
+ * @returns `true` if the run was flipped to `completed` by this call,
+ *   `false` otherwise (still running, already completed, or any other
+ *   terminal status).
  */
 export function maybeFinaliseRun(
   db: Database.Database,
   runId: string,
   now: string,
 ): boolean {
-  void db;
-  void runId;
-  void now;
-  // TODO(M10 / colophon-group/murmur#18): when all non-skipped instances
-  // of `runId` are `done`, compose `final_output` per the pipeline def's
-  // `composes:` and POST it to `webhook_url`. For M5 this is a no-op and
-  // the run stays in `status='running'`.
-  return false;
+  // 1. Bail out if the run is already terminal. The flip is idempotent
+  //    but we want to avoid clobbering `completed_at`.
+  const runRow = db
+    .prepare(`SELECT status FROM runs WHERE id = ?`)
+    .get(runId) as { status: string } | undefined;
+  if (runRow === undefined) return false;
+  if (runRow.status !== "running") return false;
+
+  // 2. Count non-terminal instances. Terminal states are `done`,
+  //    `skipped`, `failed`. Anything else (`pending`, `ready`,
+  //    `claimed`, plus any future status) keeps the run live.
+  const nonTerminal = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM subtask_instances
+        WHERE run_id = ?
+          AND status NOT IN ('done', 'skipped', 'failed')`,
+    )
+    .get(runId) as { c: number };
+  if (nonTerminal.c > 0) return false;
+
+  // 3. Sanity: the run must have at least one row (otherwise the
+  //    publisher created the run with no subtasks — a bug, not a
+  //    completion). Avoids flipping an empty-shell run to `completed`.
+  const total = db
+    .prepare(`SELECT COUNT(*) AS c FROM subtask_instances WHERE run_id = ?`)
+    .get(runId) as { c: number };
+  if (total.c === 0) return false;
+
+  // 4. Flip. TODO(M11 / colophon-group/murmur#19): compose
+  //    `final_output` per `final_output.composes`. TODO(M10 /
+  //    colophon-group/murmur#18): POST the webhook. Both depend on the
+  //    row being `completed`; this is the precondition.
+  db.prepare(
+    `UPDATE runs SET status = 'completed', completed_at = ? WHERE id = ?`,
+  ).run(now, runId);
+  return true;
+}
+
+/**
+ * Helper: read the parent instance row's `(run_id, subtask_id)` so the
+ * caller can locate the parent's `SubtaskDef` in the pipeline def.
+ *
+ * Returns `null` if the row no longer exists (would indicate a logic
+ * error — the CAS just succeeded on this id).
+ *
+ * Exported so unit tests can probe the lookup independently of
+ * {@link spawnChildren}.
+ */
+export function lookupParentForSpawn(
+  db: Database.Database,
+  parentInstanceId: string,
+): { run_id: string; subtask_id: string } | null {
+  const row = db
+    .prepare(
+      `SELECT run_id, subtask_id FROM subtask_instances WHERE id = ?`,
+    )
+    .get(parentInstanceId) as
+    | { run_id: string; subtask_id: string }
+    | undefined;
+  if (row === undefined) return null;
+  return { run_id: row.run_id, subtask_id: row.subtask_id };
+}
+
+/**
+ * Helper: locate the parent's `SubtaskDef` inside the run's pipeline
+ * `def_json`. Used by {@link spawnChildren} to access `spawns:` and the
+ * template's full def.
+ *
+ * Exported so unit tests can probe the lookup independently of
+ * {@link spawnChildren}.
+ *
+ * @returns the matching `SubtaskDef` or `null` if either the pipeline
+ *   def cannot be located/parsed or the subtask def is missing.
+ */
+export function lookupSubtaskDef(
+  db: Database.Database,
+  runId: string,
+  subtaskId: string,
+): SubtaskDef | null {
+  const row = db
+    .prepare(
+      `SELECT pipelines.def_json AS def_json
+         FROM pipelines
+         JOIN runs ON runs.pipeline_id = pipelines.id
+        WHERE runs.id = ?`,
+    )
+    .get(runId) as { def_json: string } | undefined;
+  if (row === undefined) return null;
+  let def: { subtasks: ReadonlyArray<SubtaskDef> };
+  try {
+    def = JSON.parse(row.def_json) as { subtasks: ReadonlyArray<SubtaskDef> };
+  } catch {
+    return null;
+  }
+  const subtask = def.subtasks.find((s) => s.id === subtaskId);
+  return subtask ?? null;
 }
