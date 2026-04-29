@@ -227,6 +227,9 @@ async function startRun(harness: IntegrationHarness): Promise<string> {
       `startRun returned ok=false: ${JSON.stringify(env.errors)}`,
     );
   }
+  if (env.data === undefined) {
+    throw new Error("startRun: ok envelope without data");
+  }
   const runId = env.data.run_id;
 
   // Insert `pending` rows for every static subtask whose `requires` is

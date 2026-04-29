@@ -35,12 +35,7 @@
  *     is jobseek-side and out of scope here).
  */
 
-import {
-  createServer,
-  type IncomingMessage,
-  type Server,
-  type ServerResponse,
-} from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 /**

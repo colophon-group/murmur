@@ -152,12 +152,15 @@ export async function runScriptedAgent(
         `pull_task envelope was not ok at iteration ${iter}: errors=${JSON.stringify(claim.errors)}`,
       );
     }
-    if (claim.data === null) {
-      // Empty queue → loop is done.
+    if (claim.data === undefined || claim.data === null) {
+      // Empty queue → loop is done. (`data === null` is the empty
+      // queue per M5; `data === undefined` would be a type-shape miss
+      // we never expect at runtime but the discriminated-union type
+      // permits.)
       return { runId, claimedSubtaskOrder: claimed };
     }
 
-    const data = claim.data;
+    const data: PullTaskData = claim.data;
 
     // Resolve the claim row to learn the subtask_id (the data envelope
     // doesn't carry it directly — `instructions` is a free-text field).
