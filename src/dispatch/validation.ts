@@ -49,6 +49,54 @@ import Ajv2020, { type ValidateFunction, type ErrorObject } from "ajv/dist/2020.
 import addFormats from "ajv-formats";
 
 /**
+ * Ajv instance used for registration-time schema-shape validation.
+ *
+ * `strict: true` rejects unknown keywords, unresolved `$ref`s,
+ * mismatched types, etc. — exactly what we want when an operator
+ * uploads a pipeline definition: typos like `requried` should be
+ * caught at upload, not at the first runtime validation.
+ *
+ * `allErrors: true` is harmless here (compile-time errors are first-
+ * fail anyway) but keeps both instances configured consistently.
+ *
+ * `ajv-formats` is loaded so format keywords like `format: "uri"`,
+ * `format: "date-time"`, etc. are recognized — the §3.1 jobseek
+ * pipeline uses `format: "uri"` on `canonical_website` and `board_url`.
+ */
+const registrationAjv = new Ajv2020({
+  strict: true,
+  allErrors: true,
+});
+addFormats(registrationAjv);
+
+/**
+ * Ajv instance used for runtime instance validation.
+ *
+ * `strict: 'log'` downgrades unknown-keyword errors to `console.warn`
+ * rather than failing compilation. This matters because a schema may
+ * be authored with forward-compatibility annotations (e.g. an
+ * `x-internal` extension); we don't want such a schema to break a
+ * submission. Schemas reach runtime only after passing
+ * {@link validateJsonSchema}, so genuinely-broken schemas are already
+ * filtered out by then.
+ *
+ * `allErrors: true` is the key behavior — we return EVERY validation
+ * failure for an instance, not just the first.
+ */
+const runtimeAjv = new Ajv2020({
+  strict: "log",
+  allErrors: true,
+});
+addFormats(runtimeAjv);
+
+/**
+ * Cache of compiled validators, keyed by schema reference.
+ * `WeakMap` so a schema that is no longer referenced is reclaimed
+ * along with its compiled function.
+ */
+const compiledCache = new WeakMap<object, ValidateFunction>();
+
+/**
  * Result of registration-time JSON Schema shape validation.
  *
  * A successful result carries no payload — the caller already holds
@@ -93,7 +141,35 @@ export type ValidateAgainstResult<T> =
  *          Never throws — Ajv's compile errors are caught and converted.
  */
 export function validateJsonSchema(schema: unknown): ValidateSchemaResult {
-  throw new Error("not implemented");
+  // Reject obviously non-schema inputs up front. A JSON Schema is
+  // always a JSON object in our world; `true`/`false` are technically
+  // valid 2020-12 schemas but they're nonsensical as a pipeline
+  // input/output schema and almost always indicate a configuration
+  // error in the YAML. Treat them as invalid.
+  if (
+    schema === null ||
+    typeof schema !== "object" ||
+    Array.isArray(schema)
+  ) {
+    return {
+      ok: false,
+      error: `:schema must be a JSON object, got ${
+        schema === null ? "null" : Array.isArray(schema) ? "array" : typeof schema
+      }`,
+    };
+  }
+
+  try {
+    // Compile through the strict instance. Any unknown keyword,
+    // unresolved $ref, or type-level malformation throws here.
+    registrationAjv.compile(schema);
+    return { ok: true };
+  } catch (err) {
+    // Ajv errors are strings/Errors. Surface a single-line message
+    // suitable for the offending-path response.
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
 }
 
 /**
@@ -130,7 +206,47 @@ export function validateAgainst<T = unknown>(
   schema: unknown,
   instance: unknown,
 ): ValidateAgainstResult<T> {
-  throw new Error("not implemented");
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    return {
+      ok: false,
+      errors: [
+        `validation::schema must be a JSON object, got ${
+          schema === null ? "null" : Array.isArray(schema) ? "array" : typeof schema
+        }`,
+      ],
+    };
+  }
+
+  // Cache lookup — schemas are passed by reference from the pipelines
+  // table; the same object identity recurs across many calls.
+  let validate = compiledCache.get(schema);
+  if (validate === undefined) {
+    try {
+      validate = runtimeAjv.compile(schema);
+    } catch (err) {
+      // Should not happen in production: schemas pass `validateJsonSchema`
+      // at registration. If it does, surface the compile error so the
+      // dispatch handler can return a 500-style envelope.
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, errors: [`validation::${message}`] };
+    }
+    compiledCache.set(schema, validate);
+  }
+
+  const valid = validate(instance);
+  if (valid) {
+    return { ok: true, value: instance as T };
+  }
+
+  // `validate.errors` is non-null when `valid` is false. Defensive `?? []`
+  // for type narrowing only.
+  const errors = (validate.errors ?? []).map(formatAjvError);
+  // If Ajv somehow returned no error objects despite reporting invalid,
+  // ensure we still emit a non-empty errors array (M0 contract).
+  if (errors.length === 0) {
+    return { ok: false, errors: ["validation::unspecified validation error"] };
+  }
+  return { ok: false, errors };
 }
 
 /**
@@ -143,5 +259,8 @@ export function validateAgainst<T = unknown>(
  *          the empty string for root-level errors.
  */
 export function formatAjvError(err: ErrorObject): string {
-  throw new Error("not implemented");
+  // Ajv 2020 always populates `instancePath` (empty string at root).
+  // `message` is normally present but typed `string | undefined`;
+  // fall back to an empty string defensively.
+  return `validation:${err.instancePath}:${err.message ?? ""}`;
 }

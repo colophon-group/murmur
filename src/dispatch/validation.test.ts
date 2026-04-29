@@ -277,6 +277,39 @@ describe("validateAgainst (runtime instance validation)", () => {
     expect(bad.ok).toBe(false);
   });
 
+  it("rejects validateAgainst when called with a non-object schema (defensive)", () => {
+    const r1 = validateAgainst(null, { x: 1 });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) {
+      expect(r1.errors[0]).toContain("validation::schema must be a JSON object");
+    }
+    const r2 = validateAgainst([1, 2, 3], { x: 1 });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) {
+      expect(r2.errors[0]).toContain("validation::schema must be a JSON object");
+      expect(r2.errors[0]).toContain("array");
+    }
+    const r3 = validateAgainst("string-not-schema", { x: 1 });
+    expect(r3.ok).toBe(false);
+    if (!r3.ok) {
+      expect(r3.errors[0]).toContain("string");
+    }
+  });
+
+  it("returns the compile error if validateAgainst is called with an uncompilable schema (should not happen in prod)", () => {
+    // `$ref` to a non-existent definition fails to compile even at the
+    // tolerant runtime instance.
+    const broken = {
+      type: "object",
+      properties: { x: { $ref: "#/$defs/Nope" } },
+    };
+    const r = validateAgainst(broken, { x: 1 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors[0]).toMatch(/^validation::/);
+    }
+  });
+
   it("does NOT use the strict registration validator at runtime — unknown keyword logs but does not fail", () => {
     // Runtime Ajv is `strict: 'log'`. A schema with a harmless unknown
     // keyword (e.g. an OpenAPI extension like `x-internal`) should still
