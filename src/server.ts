@@ -6,6 +6,7 @@ import type { Err } from "@murmur/contracts-types";
 import { createAgentApp } from "./api/agent/index.js";
 import { createPublisherApp } from "./api/publisher/index.js";
 import { bearerAuth } from "./auth/index.js";
+import { createMcpRoute } from "./mcp/server.js";
 
 /**
  * Options accepted by `createServer`.
@@ -74,7 +75,15 @@ export function createServer(options: CreateServerOptions): Hono {
   if (options.db !== undefined) {
     const publisher = createPublisherApp({ db: options.db });
     app.route("/", publisher);
-    app.route("/work", createAgentApp({ db: options.db }));
+    // Construct the agent sub-app once and reuse it for both the HTTP
+    // mount (`/work`) and the MCP transport (`/mcp`) — the MCP tool
+    // handlers call this exact instance via `app.request(...)`,
+    // sidestepping the network entirely (DESIGN.md §3.4 mounts both
+    // surfaces on the same port; sharing the in-process app removes a
+    // hop and a TLS round-trip).
+    const agent = createAgentApp({ db: options.db });
+    app.route("/work", agent);
+    app.route("/mcp", createMcpRoute({ agentApp: agent }));
   }
 
   // 404 fallback. The body conforms to M0's `Err` envelope shape:

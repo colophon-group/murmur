@@ -24,11 +24,13 @@
     "migrate:memory": "tsx src/db/cli.ts --memory"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@murmur/contracts-types": "workspace:*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "better-sqlite3": "^12.9.0",
-    "yaml": "^2.8.3"
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@hono/node-server": "1.13.7",
