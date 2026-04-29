@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: quality
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('Dockerfile') != ''
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     concurrency:
       group: build-main
       cancel-in-progress: false
@@ -90,6 +90,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build & push
+        if: hashFiles('Dockerfile') != ''
         uses: docker/build-push-action@v5
         with:
           context: .
