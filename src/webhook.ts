@@ -118,6 +118,17 @@ export interface DeliverWebhookOptions {
 }
 
 /**
+ * Module-scoped registry of in-flight retry promises. Each entry is a
+ * promise that resolves once the scheduled retry attempt has run to
+ * completion (success or failure persisted). Tests await these via
+ * {@link awaitPendingWebhookDeliveries} before asserting on DB state.
+ *
+ * Production callers don't observe this — the promises are hooked up
+ * so unhandled rejections are swallowed inside the retry path.
+ */
+const pendingDeliveries: Set<Promise<void>> = new Set();
+
+/**
  * Compose `final_output` and POST it to the run's webhook URL,
  * scheduling one retry 30s later on non-2xx.
  *
@@ -146,7 +157,113 @@ export async function deliverWebhook(
   runId: string,
   opts: DeliverWebhookOptions,
 ): Promise<void> {
-  throw new Error("not implemented");
+  const fetchImpl = opts.fetchImpl ?? defaultFetch;
+  const setTimeoutFn = opts.setTimeoutFn ?? defaultSetTimeout;
+  const retryDelayMs = opts.retryDelayMs ?? DEFAULT_WEBHOOK_RETRY_DELAY_MS;
+  const requestTimeoutMs =
+    opts.requestTimeoutMs ?? DEFAULT_WEBHOOK_REQUEST_TIMEOUT_MS;
+  const nowFn = opts.nowFn ?? (() => new Date().toISOString());
+
+  // 1. Load the run + pipeline def.
+  const loaded = loadRunForWebhook(db, runId);
+  if (loaded === null) {
+    log.error("webhook.run_not_found", { run_id: runId });
+    return;
+  }
+  const { row, def } = loaded;
+
+  // 2. Idempotency guard — if status is already terminal (`delivered`
+  //    or `failed`), do nothing. Re-firing on already-pending is fine
+  //    (treat as the first attempt of the cycle).
+  if (row.webhook_status === "delivered" || row.webhook_status === "failed") {
+    log.warn("webhook.already_terminal", {
+      run_id: runId,
+      webhook_status: row.webhook_status,
+    });
+    return;
+  }
+
+  // 3. Compose final_output (M11) and persist it + flip status to
+  //    `pending`. Single small txn — no external HTTP yet.
+  const finalOutput = composeFinalOutput(db, runId, def);
+  const finalOutputJson = JSON.stringify(finalOutput);
+  db.prepare(
+    `UPDATE runs
+        SET final_output_json = ?, webhook_status = 'pending'
+      WHERE id = ?`,
+  ).run(finalOutputJson, runId);
+
+  // 4. Build request shape — same headers + body for both attempts.
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${opts.bearer}`,
+    "idempotency-key": runId,
+  };
+  const body = finalOutputJson;
+  const url = row.webhook_url;
+  const hostForLog = scrubUrlForLog(url);
+
+  // 5. First attempt.
+  const firstOk = await tryDeliver({
+    fetchImpl,
+    url,
+    headers,
+    body,
+    requestTimeoutMs,
+    runId,
+    hostForLog,
+    attempt: 1,
+  });
+
+  if (firstOk) {
+    db.prepare(`UPDATE runs SET webhook_status = 'delivered' WHERE id = ?`).run(
+      runId,
+    );
+    log.info("webhook.delivered", {
+      run_id: runId,
+      attempt: 1,
+      host: hostForLog,
+      ts: nowFn(),
+    });
+    return;
+  }
+
+  // 6. Schedule the (one and only) retry. Detached so the caller's
+  //    submit_result response races ahead.
+  const retryPromise = new Promise<void>((resolve) => {
+    setTimeoutFn(() => {
+      void runRetry({
+        db,
+        runId,
+        fetchImpl,
+        url,
+        headers,
+        body,
+        requestTimeoutMs,
+        hostForLog,
+        nowFn,
+      })
+        .catch((err: unknown) => {
+          // tryDeliver swallows transport errors; runRetry only throws
+          // on a DB failure mid-update. Surface, but don't reject the
+          // tracking promise — tests must continue to drain.
+          log.error("webhook.retry_unexpected_error", {
+            run_id: runId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          resolve();
+        });
+    }, retryDelayMs);
+  });
+
+  pendingDeliveries.add(retryPromise);
+  // Auto-cleanup: remove from the set after the promise settles so the
+  // module-level set doesn't grow unbounded.
+  void retryPromise.finally(() => {
+    pendingDeliveries.delete(retryPromise);
+  });
 }
 
 /**
@@ -156,7 +273,10 @@ export async function deliverWebhook(
  * this.
  */
 export async function awaitPendingWebhookDeliveries(): Promise<void> {
-  throw new Error("not implemented");
+  // Snapshot the set — `finally` handlers may mutate it as deliveries
+  // settle. `Promise.allSettled` drains both ok and err paths.
+  const snapshot = Array.from(pendingDeliveries);
+  await Promise.allSettled(snapshot);
 }
 
 /**
@@ -165,7 +285,7 @@ export async function awaitPendingWebhookDeliveries(): Promise<void> {
  * scheduled retry was deliberately abandoned.
  */
 export function resetPendingWebhookDeliveriesForTest(): void {
-  throw new Error("not implemented");
+  pendingDeliveries.clear();
 }
 
 /**
@@ -188,13 +308,223 @@ export function loadRunForWebhook(
   db: Database.Database,
   runId: string,
 ): { readonly row: RunRowForWebhook; readonly def: PipelineDef } | null {
-  throw new Error("not implemented");
+  const row = db
+    .prepare(
+      `SELECT runs.id            AS id,
+              runs.webhook_url   AS webhook_url,
+              runs.webhook_status AS webhook_status,
+              runs.final_output_json AS final_output_json,
+              pipelines.def_json AS def_json
+         FROM runs
+         JOIN pipelines ON pipelines.id = runs.pipeline_id
+        WHERE runs.id = ?`,
+    )
+    .get(runId) as
+    | {
+        id: string;
+        webhook_url: string;
+        webhook_status: string | null;
+        final_output_json: string | null;
+        def_json: string;
+      }
+    | undefined;
+  if (row === undefined) return null;
+
+  let def: PipelineDef;
+  try {
+    def = JSON.parse(row.def_json) as PipelineDef;
+  } catch (err) {
+    log.error("webhook.pipeline_def_unparseable", {
+      run_id: runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  return {
+    row: {
+      id: row.id,
+      webhook_url: row.webhook_url,
+      webhook_status: row.webhook_status,
+      final_output_json: row.final_output_json,
+    },
+    def,
+  };
 }
 
 /**
  * Internal — log helper that scrubs the URL down to host. Exported for
  * tests so the scrub can be asserted without poking at the logger.
+ *
+ * Returns the bare host (no path, no query, no userinfo). If the input
+ * is unparseable, returns a sentinel string. Never throws.
  */
 export function scrubUrlForLog(url: string): string {
-  throw new Error("not implemented");
+  try {
+    const parsed = new URL(url);
+    return parsed.host;
+  } catch {
+    return "<unparseable>";
+  }
+}
+
+// --------------------------------------------------------------------------
+// Internals
+// --------------------------------------------------------------------------
+
+/**
+ * Default transport — undici's `request`. We deliberately do NOT keep a
+ * module-scoped `Pool` per origin (unlike `src/dispatch/task_tool.ts`)
+ * because webhook delivery is low-volume and the publisher's host is
+ * usually distinct from any subcommand publisher; a per-call client is
+ * fine.
+ */
+const defaultFetch: WebhookFetch = async (url, init) => {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    DEFAULT_WEBHOOK_REQUEST_TIMEOUT_MS,
+  );
+  if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+    (timer as unknown as { unref: () => void }).unref();
+  }
+  try {
+    const res = await undiciRequest(url, {
+      method: "POST",
+      headers: init.headers,
+      body: init.body,
+      signal: init.signal ?? controller.signal,
+    });
+    // Drain the body so undici can recycle the socket. We don't
+    // surface the body to the caller — delivery only cares about the
+    // status code per the issue.
+    try {
+      for await (const _ of res.body) {
+        // discard
+        void _;
+      }
+    } catch {
+      // ignore drain errors; the status was the only thing we needed.
+    }
+    return { status: res.statusCode };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Default scheduler — Node's `setTimeout`. We `unref()` the handle so a
+ * pending retry timer never blocks process exit (the caller's
+ * `submit_result` response has already gone out by then).
+ */
+function defaultSetTimeout(callback: () => void, ms: number): unknown {
+  const handle = setTimeout(callback, ms);
+  if (typeof (handle as unknown as { unref?: () => void }).unref === "function") {
+    (handle as unknown as { unref: () => void }).unref();
+  }
+  return handle;
+}
+
+interface DeliverAttemptInput {
+  readonly fetchImpl: WebhookFetch;
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: string;
+  readonly requestTimeoutMs: number;
+  readonly runId: string;
+  readonly hostForLog: string;
+  readonly attempt: number;
+}
+
+/**
+ * Run one delivery attempt. Returns true on 2xx, false on non-2xx OR a
+ * transport error. Logs each outcome at info or warn; never throws.
+ *
+ * The `requestTimeoutMs` parameter currently only steers the default
+ * undici transport (the test stub ignores it). The default transport
+ * wires its own AbortController; we don't pass one in here so the
+ * stub doesn't have to.
+ */
+async function tryDeliver(opts: DeliverAttemptInput): Promise<boolean> {
+  try {
+    const res = await opts.fetchImpl(opts.url, {
+      method: "POST",
+      headers: opts.headers,
+      body: opts.body,
+    });
+    const ok = res.status >= 200 && res.status < 300;
+    if (ok) {
+      log.info("webhook.attempt_ok", {
+        run_id: opts.runId,
+        attempt: opts.attempt,
+        host: opts.hostForLog,
+        status: res.status,
+      });
+    } else {
+      log.warn("webhook.attempt_non_2xx", {
+        run_id: opts.runId,
+        attempt: opts.attempt,
+        host: opts.hostForLog,
+        status: res.status,
+      });
+    }
+    return ok;
+  } catch (err) {
+    log.warn("webhook.attempt_transport_error", {
+      run_id: opts.runId,
+      attempt: opts.attempt,
+      host: opts.hostForLog,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+interface RunRetryInput {
+  readonly db: Database.Database;
+  readonly runId: string;
+  readonly fetchImpl: WebhookFetch;
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: string;
+  readonly requestTimeoutMs: number;
+  readonly hostForLog: string;
+  readonly nowFn: () => string;
+}
+
+/**
+ * Run the second-and-final attempt, persisting `delivered` on 2xx or
+ * `failed` otherwise. Quality gate: this MUST NOT schedule another
+ * retry. Bounded at exactly one retry per the issue.
+ */
+async function runRetry(opts: RunRetryInput): Promise<void> {
+  const ok = await tryDeliver({
+    fetchImpl: opts.fetchImpl,
+    url: opts.url,
+    headers: opts.headers,
+    body: opts.body,
+    requestTimeoutMs: opts.requestTimeoutMs,
+    runId: opts.runId,
+    hostForLog: opts.hostForLog,
+    attempt: 2,
+  });
+
+  const status = ok ? "delivered" : "failed";
+  opts.db
+    .prepare(`UPDATE runs SET webhook_status = ? WHERE id = ?`)
+    .run(status, opts.runId);
+
+  if (ok) {
+    log.info("webhook.delivered", {
+      run_id: opts.runId,
+      attempt: 2,
+      host: opts.hostForLog,
+      ts: opts.nowFn(),
+    });
+  } else {
+    log.error("webhook.failed", {
+      run_id: opts.runId,
+      host: opts.hostForLog,
+      ts: opts.nowFn(),
+    });
+  }
 }

@@ -29,7 +29,6 @@ import {
   describe,
   expect,
   it,
-  vi,
 } from "vitest";
 
 import type { PipelineDef } from "@murmur/contracts-types";
