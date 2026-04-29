@@ -238,8 +238,10 @@ describe("dispatchTaskTool — claim resolution", () => {
   });
 
   it("Expired claim (expires_at in the past) → claim_lost", async () => {
-    // Seed a claim that's already expired by setting ttl to 0 then
-    // overriding the row.
+    // Seed a claim that's already expired by setting ttl to a negative
+    // value. We pass `nowFn` so the dispatcher's "now" comparison is
+    // deterministic against the seeded `expires_at` regardless of
+    // real wallclock.
     const { db } = seedClaim({
       endpoint: `POST ${stub!.origin}/probe`,
       ttlMs: -1000,
@@ -251,6 +253,9 @@ describe("dispatchTaskTool — claim resolution", () => {
       subcommand: "probe",
       args: {},
       bearer: "TOK",
+      // Seeded "now" was 2026-04-29T12:00:00; expires_at = T11:59:59.
+      // Pin "now" 1 ms after the seeded clock.
+      nowFn: () => "2026-04-29T12:00:00.001Z",
     });
 
     expect(result.ok).toBe(false);
@@ -466,20 +471,19 @@ describe("dispatchTaskTool — publisher failure modes", () => {
   });
 
   it("Stub publisher hangs > timeout → publisher_timeout AND outbound socket aborted", async () => {
-    let hangResAttached = false;
-    stub!.setHandler((req, _res) => {
-      // Never call res.end; observe the request's `aborted`/`close` events
-      // to confirm the client closes the connection.
-      hangResAttached = true;
-      req.on("close", () => {
-        // No-op — we only need this listener to be registered to track
-        // that the connection actually closes.
+    // The stub never finishes the response. We listen for the request's
+    // 'close' event server-side: when the client aborts, Node emits
+    // 'close' on the IncomingMessage. That's the canonical signal that
+    // the upstream connection actually closed (vs. just the AbortController
+    // firing client-side without affecting the wire).
+    const sawServerSideClose = new Promise<void>((resolve) => {
+      stub!.setHandler((req, _res) => {
+        req.on("close", () => resolve());
       });
     });
 
     const { db } = seedClaim({ endpoint: `POST ${stub!.origin}/probe` });
 
-    const before = stub!.connections.opened;
     const result = await dispatchTaskTool({
       db,
       claimToken: "c_test",
@@ -493,15 +497,14 @@ describe("dispatchTaskTool — publisher failure modes", () => {
     if (!result.ok) {
       expect(result.errors).toContain("publisher_timeout");
     }
-    expect(hangResAttached).toBe(true);
 
-    // After the abort, the server's connection-close counter must
-    // catch up to the opened counter for THIS test's request.
-    // We give the close event a few ms to propagate.
-    await new Promise((r) => setTimeout(r, 50));
-    expect(stub!.connections.closed).toBeGreaterThanOrEqual(
-      stub!.connections.opened - before,
-    );
+    // Server must observe the connection close as a result of the abort.
+    // Race with a 1s safety timer so a regression doesn't hang the suite.
+    const observed = await Promise.race([
+      sawServerSideClose.then(() => "closed" as const),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 1000)),
+    ]);
+    expect(observed).toBe("closed");
   });
 
   it("Stub publisher streams > cap → publisher_response_too_large AND read aborted", async () => {
@@ -510,25 +513,28 @@ describe("dispatchTaskTool — publisher failure modes", () => {
     // until the client closes.
     let chunksWritten = 0;
     let serverEnded = false;
-    let serverClosedByClient = false;
-    stub!.setHandler((_req, res) => {
-      res.statusCode = 200;
-      res.setHeader("content-type", "application/octet-stream");
-      // Don't set content-length; chunked encoding.
-      const interval = setInterval(() => {
-        if (!res.write(Buffer.alloc(512, 0x41))) {
-          // backpressure: wait for drain.
-        }
-        chunksWritten += 1;
-        if (chunksWritten > 100) {
+    const sawServerSideClose = new Promise<void>((resolve) => {
+      stub!.setHandler((_req, res) => {
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/octet-stream");
+        // Don't set content-length; chunked encoding.
+        const interval = setInterval(() => {
+          if (res.writableEnded || res.destroyed) {
+            clearInterval(interval);
+            return;
+          }
+          res.write(Buffer.alloc(512, 0x41));
+          chunksWritten += 1;
+          if (chunksWritten > 200) {
+            clearInterval(interval);
+            serverEnded = true;
+            res.end();
+          }
+        }, 5);
+        res.on("close", () => {
           clearInterval(interval);
-          serverEnded = true;
-          res.end();
-        }
-      }, 5);
-      res.on("close", () => {
-        if (!serverEnded) serverClosedByClient = true;
-        clearInterval(interval);
+          resolve();
+        });
       });
     });
 
@@ -547,11 +553,19 @@ describe("dispatchTaskTool — publisher failure modes", () => {
     if (!result.ok) {
       expect(result.errors).toContain("publisher_response_too_large");
     }
-    // The client must have aborted before the server finished writing.
-    expect(serverClosedByClient).toBe(true);
-    // Sanity: chunks written when client cancelled is much less than full
-    // (full would be 100+).
-    expect(chunksWritten).toBeLessThan(100);
+
+    // Wait for the server-side close to fire as a result of the client
+    // aborting — proves the abort actually closed the wire connection.
+    const observed = await Promise.race([
+      sawServerSideClose.then(() => "closed" as const),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 1000)),
+    ]);
+    expect(observed).toBe("closed");
+
+    // Sanity: chunks written when client cancelled is much less than the
+    // 200-chunk full payload — proves we aborted mid-stream.
+    expect(chunksWritten).toBeLessThan(200);
+    expect(serverEnded).toBe(false);
   });
 });
 

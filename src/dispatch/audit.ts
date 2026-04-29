@@ -59,5 +59,18 @@ export interface TruncatedAuditField {
  * @returns the (possibly clipped) text and the truncated flag.
  */
 export function truncateForAudit(json: string | null): TruncatedAuditField {
-  throw new Error("not implemented");
+  if (json === null) {
+    return { text: null, truncated: false };
+  }
+  const byteLen = Buffer.byteLength(json, "utf8");
+  if (byteLen <= AUDIT_PAYLOAD_LIMIT_BYTES) {
+    return { text: json, truncated: false };
+  }
+  // Slice at the byte cap, then drop trailing partial UTF-8 sequences
+  // by decoding permissively and stripping replacement chars at the end.
+  const buf = Buffer.from(json, "utf8");
+  const slice = buf.subarray(0, AUDIT_PAYLOAD_LIMIT_BYTES);
+  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(slice);
+  const cleaned = decoded.replace(/�+$/u, "");
+  return { text: cleaned, truncated: true };
 }
