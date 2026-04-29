@@ -6,7 +6,9 @@ import type { Err } from "@murmur/contracts-types";
 import { createAgentApp } from "./api/agent/index.js";
 import { createPublisherApp } from "./api/publisher/index.js";
 import { bearerAuth } from "./auth/index.js";
+import { log } from "./logger.js";
 import { createMcpRoute } from "./mcp/server.js";
+import { deliverWebhook } from "./webhook.js";
 
 /**
  * Options accepted by `createServer`.
@@ -81,7 +83,26 @@ export function createServer(options: CreateServerOptions): Hono {
     // sidestepping the network entirely (DESIGN.md §3.4 mounts both
     // surfaces on the same port; sharing the in-process app removes a
     // hop and a TLS round-trip).
-    const agent = createAgentApp({ db: options.db });
+    // Bind the webhook delivery hook with the boot-loaded bearer. The
+    // factory is fire-and-forget per M10's "does not block submit_result
+    // response" requirement; we swallow any throw inside the closure
+    // because `deliverWebhook` already logs failures internally.
+    const tokenForWebhook = options.token.toString("utf8");
+    const dbForWebhook = options.db;
+    const deliverWebhookFn = (runId: string): void => {
+      void deliverWebhook(dbForWebhook, runId, {
+        bearer: tokenForWebhook,
+      }).catch((err: unknown) => {
+        log.error("webhook.delivery_failed", {
+          run_id: runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    };
+    const agent = createAgentApp({
+      db: options.db,
+      deliverWebhookFn,
+    });
     app.route("/work", agent);
     app.route("/mcp", createMcpRoute({ agentApp: agent }));
   }

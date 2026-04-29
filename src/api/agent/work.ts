@@ -77,6 +77,19 @@ export interface CreateWorkRoutesOptions {
    * a deterministic counter so spawned ids match assertions.
    */
   readonly instanceIdFn?: () => string;
+  /**
+   * Webhook delivery hook (M10). Invoked fire-and-forget after the CAS
+   * transaction commits when {@link maybeFinaliseRun} returned `true`
+   * (i.e. this submit just flipped the run to `completed`). Caller
+   * supplies a closure with the bearer + transport already bound so
+   * the work route stays decoupled from `MURMUR_TOKEN` plumbing.
+   *
+   * Default: a no-op (so existing tests continue to work without
+   * exercising webhook delivery). Production wires this in
+   * `src/server.ts` to a closure over `deliverWebhook` from
+   * `src/webhook.ts`.
+   */
+  readonly deliverWebhookFn?: (runId: string) => void;
 }
 
 /**
@@ -156,6 +169,9 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
   const nowFn = options.nowFn ?? (() => nowIso());
   const claimTokenFn = options.claimTokenFn ?? freshClaimToken;
   const instanceIdFn = options.instanceIdFn ?? newInstanceId;
+  // Default deliverWebhookFn is a no-op — most tests don't exercise the
+  // webhook surface, and production wiring lives in `src/server.ts`.
+  const deliverWebhookFn = options.deliverWebhookFn ?? noopDeliverWebhook;
 
   // Compile the prepared statements once at construction time. Re-binding
   // happens on every call but the parse step runs once.
@@ -348,6 +364,7 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
     // a crash leaves the DB consistent.
     db.exec("BEGIN IMMEDIATE");
     let casRow: CasOkRow | undefined;
+    let runJustCompleted = false;
     try {
       casRow = casStmt.get(now, token, now) as CasOkRow | undefined;
       if (casRow === undefined) {
@@ -385,7 +402,7 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
         // pending/ready rows that spawns just inserted.
         spawnChildren(db, casRow.id, validation.value, now, instanceIdFn);
         markNextReady(db, casRow.run_id, now);
-        maybeFinaliseRun(db, casRow.run_id, now);
+        runJustCompleted = maybeFinaliseRun(db, casRow.run_id, now);
 
         db.exec("COMMIT");
       }
@@ -403,6 +420,15 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
       return c.json(errBody, 200);
     }
 
+    // Fire the webhook fire-and-forget AFTER the COMMIT (no DB txn
+    // around external HTTP). Per the M10 issue: "Webhook delivery does
+    // not block `submit_result` response — fire-and-forget with status
+    // persisted". Errors are swallowed and logged inside
+    // {@link deliverWebhookFn}; the work response races ahead.
+    if (runJustCompleted) {
+      deliverWebhookFn(casRow.run_id);
+    }
+
     const okBody: Ok<SubmitOkData> = {
       ok: true,
       data: { run_id: casRow.run_id },
@@ -411,6 +437,16 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
   });
 
   return app;
+}
+
+/**
+ * Default webhook delivery hook — a no-op. Production wires
+ * `deliverWebhookFn` to a closure over `deliverWebhook` from
+ * `src/webhook.ts` (see `src/server.ts`); tests that don't care about
+ * the webhook surface inherit this no-op.
+ */
+function noopDeliverWebhook(_runId: string): void {
+  // intentionally empty
 }
 
 /**

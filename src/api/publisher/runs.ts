@@ -50,6 +50,13 @@ export interface RunStatusView {
   readonly pipeline_version: number;
   readonly status: string;
   readonly final_output?: unknown;
+  /**
+   * One of `pending`, `delivered`, `failed`, or `null` when the run is
+   * still in-flight or webhook delivery has not been attempted yet
+   * (M10). The column is NULL on creation and transitions
+   * `null → pending → delivered | failed`.
+   */
+  readonly webhook_status: string | null;
   readonly agent_actions: ReadonlyArray<AgentActionView>;
 }
 
@@ -60,6 +67,7 @@ interface RunRow {
   readonly pipeline_version: number;
   readonly status: string;
   readonly final_output_json: string | null;
+  readonly webhook_status: string | null;
 }
 
 /** Shape of the joined `agent_actions` row we read. */
@@ -88,7 +96,8 @@ interface AgentActionRow {
  */
 export function mountRunRoutes(app: Hono, db: Database.Database): void {
   const selectRun = db.prepare(
-    `SELECT id, pipeline_id, pipeline_version, status, final_output_json
+    `SELECT id, pipeline_id, pipeline_version, status, final_output_json,
+            webhook_status
        FROM runs WHERE id = ?`,
   );
   // Join through subtask_instances so the audit row carries `subtask_id`
@@ -149,6 +158,7 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
           pipeline_version: row.pipeline_version,
           status: row.status,
           final_output: JSON.parse(row.final_output_json) as unknown,
+          webhook_status: row.webhook_status,
           agent_actions,
         }
       : {
@@ -156,6 +166,7 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
           pipeline_id: row.pipeline_id,
           pipeline_version: row.pipeline_version,
           status: row.status,
+          webhook_status: row.webhook_status,
           agent_actions,
         };
     const ok: Ok<RunStatusView> = { ok: true, data: view };
