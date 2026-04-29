@@ -54,23 +54,31 @@ jobs:
       - name: Checkout (for compose + deploy.sh)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Copy deploy files to box
+      # Two SCP steps instead of one. scp-action tars the source list
+      # with a single `--strip-components` value; a root-level file
+      # (`docker-compose.yml`) has zero leading components, so
+      # `strip_components: 1` drops it entirely and only `deploy.sh`
+      # lands on the box. Splitting lets each file use the right
+      # strip value: 0 for the root compose file, 1 for the script
+      # under `scripts/`.
+      - name: Copy docker-compose.yml to box
         uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
         with:
           host: ${{ secrets.HETZNER_HOST }}
           username: deploy
           key: ${{ secrets.HETZNER_SSH_KEY }}
-          # `source: "a,b"` (comma-separated) per scp-action docs; the
-          # paths are relative to the workspace. `strip_components: 1`
-          # drops the leading `scripts/` so deploy.sh lands at
-          # /home/deploy/deploy.sh (compose stays at /home/deploy/
-          # docker-compose.yml).
-          source: docker-compose.yml,scripts/deploy.sh
+          source: docker-compose.yml
+          target: /home/deploy/
+
+      - name: Copy deploy.sh to box
+        uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: deploy
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          source: scripts/deploy.sh
           target: /home/deploy/
           strip_components: 1
-          # Note: docker-compose.yml at repo root has no leading dir;
-          # scp-action preserves it as-is. strip_components=1 only
-          # affects scripts/deploy.sh (→ deploy.sh on the box).
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
