@@ -546,6 +546,56 @@ describe("GET /runs/{run_id}", () => {
     expect(body.data.final_output).toEqual(finalOutput);
   });
 
+  it("exposes webhook_status from runs.webhook_status (M10)", async () => {
+    const created = await server.app.request(
+      "/pipelines/jobseek-add-company/runs",
+      {
+        method: "POST",
+        headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          initial_input: {
+            company_name: "ExampleCo",
+            website: "https://example.co",
+          },
+        }),
+      },
+    );
+    const createdBody = (await created.json()) as EnvelopeResponse<{
+      run_id: string;
+    }>;
+    if (createdBody.ok !== true || createdBody.data === undefined) {
+      throw new Error("expected ok=true with data");
+    }
+    const runId = createdBody.data.run_id;
+
+    // Initial state: webhook_status is NULL → exposed as null.
+    let response = await server.app.request(`/runs/${runId}`, {
+      headers: AUTH_HEADERS,
+    });
+    let body = (await response.json()) as EnvelopeResponse<{
+      webhook_status: string | null;
+    }>;
+    if (body.ok !== true || body.data === undefined) {
+      throw new Error("expected ok=true");
+    }
+    expect(body.data.webhook_status).toBeNull();
+
+    // Flip via SQL (simulates a completed delivery) and confirm read-back.
+    server.db
+      .prepare("UPDATE runs SET webhook_status = 'delivered' WHERE id = ?")
+      .run(runId);
+    response = await server.app.request(`/runs/${runId}`, {
+      headers: AUTH_HEADERS,
+    });
+    body = (await response.json()) as EnvelopeResponse<{
+      webhook_status: string | null;
+    }>;
+    if (body.ok !== true || body.data === undefined) {
+      throw new Error("expected ok=true");
+    }
+    expect(body.data.webhook_status).toBe("delivered");
+  });
+
   it("truncates oversize agent_action payloads with a marker", async () => {
     // Seed a run + instance + an action whose args/response are well above
     // the 1 KB read-time cap.
