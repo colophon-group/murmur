@@ -36,6 +36,7 @@ import type Database from "better-sqlite3";
 
 import type { Err, Ok } from "@murmur/contracts-types";
 
+import { truncateForAudit } from "../../dispatch/audit.js";
 import { validateAgainst } from "../../dispatch/validation.js";
 import { newInstanceId } from "../publisher/ids.js";
 
@@ -54,15 +55,6 @@ import { markNextReady, maybeFinaliseRun, spawnChildren } from "./lifecycle.js";
  * "expired claim → claim_lost" path is exercisable without sleeping.
  */
 export const DEFAULT_CLAIM_TTL_MS = 10 * 60 * 1000;
-
-/**
- * Audit-log payload truncation cap (DESIGN.md §3.6).
- *
- * `args_json` and `response_json` on `agent_actions` are capped at 4 KB.
- * Truncation is recorded by setting `truncated = 1`. The audit log is for
- * post-mortem inspection — full payloads live in `subtask_results`.
- */
-const AUDIT_PAYLOAD_LIMIT_BYTES = 4 * 1024;
 
 /**
  * Options accepted by {@link createWorkRoutes}.
@@ -239,9 +231,11 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
     }
 
     // Audit: log the claim. Truncate the projected input if it exceeds
-    // the §3.6 4 KB cap.
-    const args = truncatePayload(JSON.stringify({ claim: row.claim_token }));
-    const resp = truncatePayload(JSON.stringify({ instance_id: row.id }));
+    // the §3.6 4 KB cap. Uses the canonical `truncateForAudit` helper
+    // shared with the M7 dispatcher so both audit writers produce
+    // bit-for-bit identical truncation behaviour.
+    const args = truncateForAudit(JSON.stringify({ claim: row.claim_token }));
+    const resp = truncateForAudit(JSON.stringify({ instance_id: row.id }));
     insertActionStmt.run(
       row.id,
       now,
@@ -333,8 +327,8 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
       // Schema-fail path: leave the row claimed so the agent (or sweeper)
       // can retry. Issue requires the validation error string format.
       // Audit the rejection so operators can diagnose.
-      const args = truncatePayload(JSON.stringify(body));
-      const resp = truncatePayload(
+      const args = truncateForAudit(JSON.stringify(body));
+      const resp = truncateForAudit(
         JSON.stringify({ errors: validation.errors }),
       );
       insertActionStmt.run(
@@ -370,8 +364,8 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
         // The result column is intentionally NOT mirrored into
         // subtask_results.notes — DESIGN.md §3.1 requires notes live in
         // the audit log only.
-        const args = truncatePayload(JSON.stringify(body));
-        const resp = truncatePayload(
+        const args = truncateForAudit(JSON.stringify(body));
+        const resp = truncateForAudit(
           JSON.stringify({ run_id: casRow.run_id }),
         );
         insertActionStmt.run(
@@ -435,28 +429,6 @@ export function nowIso(d: Date = new Date()): string {
  */
 export function freshClaimToken(): string {
   return `c_${randomBytes(16).toString("base64url")}`;
-}
-
-/**
- * Truncate a JSON payload to {@link AUDIT_PAYLOAD_LIMIT_BYTES} bytes,
- * reporting whether truncation actually happened. Encoding is UTF-8.
- *
- * SQLite's TEXT type is byte-counted; we compare bytes, not code points.
- */
-function truncatePayload(text: string): {
-  text: string;
-  truncated: boolean;
-} {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= AUDIT_PAYLOAD_LIMIT_BYTES) {
-    return { text, truncated: false };
-  }
-  // Slice on a byte boundary, then decode with replacement so we don't
-  // emit a half-character at the cut point.
-  const truncated = buf
-    .subarray(0, AUDIT_PAYLOAD_LIMIT_BYTES)
-    .toString("utf8");
-  return { text: truncated, truncated: true };
 }
 
 /**

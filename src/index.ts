@@ -9,18 +9,27 @@
  *   once at boot and passed by value into `createServer`; the server module
  *   never re-reads `process.env`.
  * - Calls `createServer()` and binds it via `@hono/node-server`.
+ * - When a DB handle is passed, starts a {@link ClaimSweeper} on a 30s
+ *   `setInterval` (DESIGN.md §3.3) so expired claims return to the pool
+ *   even when no agent traffic is hitting the server. The sweeper is
+ *   stopped in `close()` so a graceful shutdown drains the timer.
+ *   Wired here, NOT inside `createServer`, so the server factory remains
+ *   pure — tests that spin up the app via `app.request(...)` don't get
+ *   unwanted background timers.
  * - Logs the listen address (port + family) via the structured logger. The
  *   token value is NEVER logged (`grep-no-token-logged` enforces this).
  *
  * This module is invoked by `pnpm dev` (`tsx watch src/index.ts`) and by the
- * Docker image entrypoint in production. It deliberately does NOT define a
- * graceful-shutdown hook here — that lands with M2's lifecycle work.
+ * Docker image entrypoint in production.
  */
 
 import { serve, type ServerType } from "@hono/node-server";
 
+import type Database from "better-sqlite3";
+
 import { log } from "./logger.js";
 import { createServer } from "./server.js";
+import { ClaimSweeper } from "./sweeper.js";
 
 const MAX_TCP_PORT = 65535;
 
@@ -101,17 +110,31 @@ export interface ServerHandle {
  * @param token the boot-loaded `MURMUR_TOKEN` buffer (see
  *   `readMurmurTokenFromEnv`). Passed by value into `createServer` so the
  *   server module is pure.
- * @returns a handle whose `close()` resolves when the underlying socket has
- *   shut down. Idempotent: calling `close()` twice is safe (the second call
- *   resolves immediately).
+ * @param db optional open SQLite handle. When supplied, the publisher and
+ *   agent sub-apps are mounted AND a {@link ClaimSweeper} is started on
+ *   the default 30s cadence (DESIGN.md §3.3). When omitted (smoke tests),
+ *   neither sub-apps nor the sweeper are wired.
+ * @returns a handle whose `close()` resolves when the underlying socket
+ *   has shut down AND the sweeper timer is cleared. Idempotent.
  */
-export function startServer(port: number, token: Buffer): ServerHandle {
-  const app = createServer({ token });
+export function startServer(
+  port: number,
+  token: Buffer,
+  db?: Database.Database,
+): ServerHandle {
+  const app = createServer(db !== undefined ? { token, db } : { token });
 
   // `@hono/node-server` returns the underlying `http.Server`. We capture it
   // typed as `ServerType` (the package's exported alias) so we can call
   // `.close()` from the handle.
   const server: ServerType = serve({ fetch: app.fetch, port });
+
+  // Start the background claim-expiry sweeper on the default 30s cadence
+  // (DESIGN.md §3.3). Without it, an agent that crashes mid-claim would
+  // hold the subtask hostage for 10 minutes. Only wire when a DB handle
+  // exists — otherwise there is no `subtask_instances` table to sweep.
+  const sweeper = db !== undefined ? new ClaimSweeper({ db }) : undefined;
+  sweeper?.start();
 
   let closed = false;
 
@@ -119,6 +142,10 @@ export function startServer(port: number, token: Buffer): ServerHandle {
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
+      // Stop the sweeper BEFORE closing the HTTP server: the sweeper is
+      // synchronous so this is a no-yield op, but doing it first means
+      // an in-flight tick can't race the DB close.
+      sweeper?.stop();
       await new Promise<void>((resolve, reject) => {
         server.close((err) => {
           if (err) reject(err);
