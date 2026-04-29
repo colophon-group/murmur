@@ -90,13 +90,6 @@ export const TOOL_TASK_TOOL = "task_tool";
 /* -------------------------------------------------------------------------- */
 
 /**
- * `pull_task` takes no parameters. The SDK's `registerTool` accepts an
- * `inputSchema` of `undefined` for zero-arg tools; we keep this exported so
- * tests can assert "no params" explicitly.
- */
-export const PULL_TASK_INPUT_SHAPE = undefined;
-
-/**
  * `submit_result` requires `claim` and `result`; `notes` is optional.
  *
  * `result` is `unknown` because the actual schema is per-subtask
@@ -214,9 +207,14 @@ function authHeaderFromExtra(
  */
 function envelopeResult(envelope: EnvelopeResponse<unknown>): CallToolResult {
   const text = JSON.stringify(envelope);
+  // `structuredContent` is typed as `Record<string, unknown>` by the SDK.
+  // The envelope is structurally a JSON object — cast through `unknown` to
+  // bridge nominal differences (Ok/Err's readonly props vs. an open
+  // record) without weakening the source type.
+  const structured = envelope as unknown as Record<string, unknown>;
   return {
     content: [{ type: "text", text }],
-    structuredContent: envelope as Record<string, unknown>,
+    structuredContent: structured,
     isError: !envelope.ok,
   };
 }
@@ -236,11 +234,14 @@ async function callAgentApp(
   if (authorization !== undefined) headers["authorization"] = authorization;
   if (method === "POST") headers["content-type"] = "application/json";
 
-  const response = await agentApp.request(path, {
-    method,
-    headers,
-    body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
-  });
+  // Build the RequestInit progressively so we don't pass `body: undefined`
+  // — TS's `exactOptionalPropertyTypes` rejects `undefined` for
+  // `BodyInit`-typed slots even though `fetch` itself accepts it.
+  const init: RequestInit = { method, headers };
+  if (method === "POST") {
+    init.body = JSON.stringify(body ?? {});
+  }
+  const response = await agentApp.request(path, init);
 
   // The agent app always emits JSON. We swallow non-JSON / non-envelope
   // bodies into a structured failure rather than letting them throw — this

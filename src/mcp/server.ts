@@ -101,9 +101,10 @@ export function createMcpRoute(options: CreateMcpRouteOptions): Hono {
     const server = new McpServer(MCP_SERVER_INFO);
     registerMcpTools(server, { agentApp: options.agentApp });
 
-    const transport = new WebStandardStreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
+    // Stateless mode: omit `sessionIdGenerator` entirely so the SDK does
+    // not generate or validate session IDs. (We can't pass `undefined`
+    // explicitly under TS's `exactOptionalPropertyTypes`.)
+    const transport = new WebStandardStreamableHTTPServerTransport({});
 
     // Connect server → transport. Per the SDK's design the
     // `connect(...)` call attaches the server's onmessage handler to the
