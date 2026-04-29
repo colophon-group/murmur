@@ -22,7 +22,7 @@
  * @see src/db/schema.md — canonical schema
  */
 
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 
 /**
  * Open a SQLite connection at `path` with Murmur's standard pragmas applied.
@@ -39,6 +39,16 @@ import type Database from "better-sqlite3";
  * issues it for parity with file-backed paths.
  */
 export function openDb(path: string): Database.Database {
-  void path;
-  throw new Error("not implemented");
+  if (path === "") {
+    throw new Error("openDb: path must not be empty");
+  }
+
+  const db = new Database(path);
+  // Order matters only insofar as `journal_mode` should be set before any
+  // writes; the other two are independent. Using `pragma` (not `exec`) so
+  // the synchronous PRAGMA returns are surfaced if needed by callers.
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("foreign_keys = ON");
+  return db;
 }

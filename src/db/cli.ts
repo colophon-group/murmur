@@ -16,6 +16,11 @@
  * CLI invocation short.
  */
 
+import { log } from "../logger.js";
+
+import { openDb } from "./index.js";
+import { runMigrations } from "./migrate.js";
+
 /**
  * Parse argv (excluding the node + script entries) into a config object.
  *
@@ -28,9 +33,22 @@ export function parseArgs(
   argv: ReadonlyArray<string>,
   env: NodeJS.ProcessEnv,
 ): { readonly path: string } | { readonly error: string } {
-  void argv;
-  void env;
-  throw new Error("not implemented");
+  let useMemory = false;
+  for (const arg of argv) {
+    if (arg === "--memory") {
+      useMemory = true;
+      continue;
+    }
+    return { error: `unknown argument: ${arg}` };
+  }
+
+  if (useMemory) return { path: ":memory:" };
+
+  const fromEnv = env.DATABASE_PATH;
+  if (fromEnv !== undefined && fromEnv !== "") {
+    return { path: fromEnv };
+  }
+  return { path: "./murmur.db" };
 }
 
 /**
@@ -42,5 +60,54 @@ export function parseArgs(
  *   `process.exit(code)`.
  */
 export async function main(): Promise<number> {
-  throw new Error("not implemented");
+  const parsed = parseArgs(process.argv.slice(2), process.env);
+  if ("error" in parsed) {
+    log.error("migrate.bad_args", { error: parsed.error });
+    return 1;
+  }
+
+  let db;
+  try {
+    db = openDb(parsed.path);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error("migrate.open_failed", { path: parsed.path, error: message });
+    return 1;
+  }
+
+  try {
+    const result = runMigrations(db);
+    log.info("migrate.done", {
+      path: parsed.path,
+      applied: result.applied,
+      skipped: result.skipped,
+    });
+    return 0;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error("migrate.failed", { path: parsed.path, error: message });
+    return 1;
+  } finally {
+    db.close();
+  }
+}
+
+// Self-invocation guard: only run `main()` when this module is executed
+// directly. Importing it from tests must not trigger a CLI run.
+const invokedDirectly =
+  typeof process !== "undefined" &&
+  Array.isArray(process.argv) &&
+  process.argv[1] !== undefined &&
+  import.meta.url === new URL(process.argv[1], "file://").href;
+
+if (invokedDirectly) {
+  main()
+    .then((code) => {
+      process.exit(code);
+    })
+    .catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error("migrate.unhandled", { error: message });
+      process.exit(1);
+    });
 }

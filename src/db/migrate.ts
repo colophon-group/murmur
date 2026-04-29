@@ -18,6 +18,9 @@
  * @see src/db/schema.md
  */
 
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
+
 import type Database from "better-sqlite3";
 
 /**
@@ -48,6 +51,8 @@ export interface MigrationResult {
  */
 export const DEFAULT_MIGRATIONS_DIR = "src/db/migrations";
 
+const MIGRATION_FILENAME = /^(\d+)_([a-z0-9_-]+)\.sql$/;
+
 /**
  * Load migrations from `dir`. Files MUST match the pattern
  * `^(\d+)_([a-z0-9_-]+)\.sql$`. The numeric prefix is the version (parsed
@@ -58,8 +63,66 @@ export const DEFAULT_MIGRATIONS_DIR = "src/db/migrations";
  *   or two files share the same version.
  */
 export function loadMigrations(dir: string): ReadonlyArray<MigrationFile> {
-  void dir;
-  throw new Error("not implemented");
+  const absDir = resolve(process.cwd(), dir);
+  const entries = readdirSync(absDir);
+
+  const files: MigrationFile[] = [];
+  const seen = new Set<number>();
+
+  for (const entry of entries) {
+    if (!entry.endsWith(".sql")) continue;
+    const match = MIGRATION_FILENAME.exec(entry);
+    if (match === null) {
+      throw new Error(
+        `loadMigrations: malformed filename ${JSON.stringify(entry)} ` +
+          `in ${dir}; expected /^(\\d+)_([a-z0-9_-]+)\\.sql$/`,
+      );
+    }
+    const versionRaw = match[1];
+    const name = match[2];
+    if (versionRaw === undefined || name === undefined) {
+      // Defensive — regex above guarantees both groups, but the index access
+      // is widened by `noUncheckedIndexedAccess`.
+      throw new Error(
+        `loadMigrations: regex group missing for ${JSON.stringify(entry)}`,
+      );
+    }
+    const version = Number(versionRaw);
+    if (!Number.isInteger(version) || version < 1) {
+      throw new Error(
+        `loadMigrations: version must be a positive integer; ` +
+          `got ${JSON.stringify(versionRaw)} in ${entry}`,
+      );
+    }
+    if (seen.has(version)) {
+      throw new Error(
+        `loadMigrations: duplicate version ${version} in ${dir}`,
+      );
+    }
+    seen.add(version);
+
+    const sql = readFileSync(resolve(absDir, entry), "utf8");
+    files.push({ version, name, sql });
+  }
+
+  files.sort((a, b) => a.version - b.version);
+  return files;
+}
+
+function ensureMigrationsTable(db: Database.Database): void {
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS _migrations (
+       version    INTEGER PRIMARY KEY,
+       applied_at TEXT NOT NULL
+     )`,
+  );
+}
+
+function appliedVersions(db: Database.Database): Set<number> {
+  const rows = db
+    .prepare("SELECT version FROM _migrations")
+    .all() as Array<{ version: number }>;
+  return new Set(rows.map((r) => r.version));
 }
 
 /**
@@ -76,7 +139,41 @@ export function runMigrations(
   db: Database.Database,
   migrations?: ReadonlyArray<MigrationFile>,
 ): MigrationResult {
-  void db;
-  void migrations;
-  throw new Error("not implemented");
+  const set = migrations ?? loadMigrations(DEFAULT_MIGRATIONS_DIR);
+
+  ensureMigrationsTable(db);
+  const already = appliedVersions(db);
+
+  const applied: number[] = [];
+  const skipped: number[] = [];
+
+  const recordStmt = db.prepare(
+    "INSERT INTO _migrations (version, applied_at) VALUES (?, ?)",
+  );
+
+  for (const m of set) {
+    if (already.has(m.version)) {
+      skipped.push(m.version);
+      continue;
+    }
+    // BEGIN IMMEDIATE acquires the RESERVED lock up front, matching the
+    // semantics M5's claim CAS will rely on. Wrapping the whole file plus
+    // the bookkeeping insert keeps the migration atomic.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(m.sql);
+      recordStmt.run(m.version, new Date().toISOString());
+      db.exec("COMMIT");
+    } catch (err) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Ignore — the original error is what matters.
+      }
+      throw err;
+    }
+    applied.push(m.version);
+  }
+
+  return { applied, skipped };
 }
