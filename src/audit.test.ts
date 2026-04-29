@@ -72,10 +72,11 @@ async function startStub(): Promise<StubServer> {
     res.end("{}");
   };
   const server: Server = createHttpServer((req, res) => {
-    let body = "";
+    // We don't inspect the body here — drain so node finishes the
+    // request lifecycle and `end` fires.
     req.setEncoding("utf8");
-    req.on("data", (c) => {
-      body += c;
+    req.on("data", () => {
+      // discarded
     });
     req.on("end", () => {
       handler(req, res);
@@ -205,6 +206,7 @@ describe("audit writer — task_tool", () => {
         subcommand: "probe",
         args: { kind: "tiny" },
         bearer: "TOK",
+        nowFn: () => NOW,
       });
 
       const rows = db
@@ -307,6 +309,7 @@ describe("audit writer — silent 4 KB truncation", () => {
         subcommand: "probe",
         args: { blob: big },
         bearer: "TOK",
+        nowFn: () => NOW,
       });
 
       const r = db
