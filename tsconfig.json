@@ -1,5 +1,12 @@
 {
-  "files": [],
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*", "test/**/*", "vitest.config.ts", "eslint.config.js"],
+  "exclude": ["node_modules", "dist", "coverage", "packages"],
   "references": [
     { "path": "./packages/contracts-types" }
   ]
