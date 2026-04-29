@@ -94,7 +94,11 @@ jobs:
         # /token?service=ghcr.io). Stdin keeps the PAT off argv. The
         # downstream docker/build-push-action@v5 reads credentials from
         # ~/.docker/config.json written here.
-        run: echo "$GHCR_PAT" | docker login ghcr.io -u "$OWNER" --password-stdin
+        # Username is the PAT owner's GitHub login (viktor-shcherb), NOT the
+        # org name. The package lives under colophon-group/ but the docker
+        # login presents the user's identity; the registry then checks that
+        # user's perms against the org package on subsequent push.
+        run: echo "$GHCR_PAT" | docker login ghcr.io -u viktor-shcherb --password-stdin
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           OWNER: ${{ github.repository_owner }}
