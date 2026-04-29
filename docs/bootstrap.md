@@ -1,6 +1,6 @@
 # Hetzner box bootstrap runbook
 
-This runbook brings a fresh Hetzner box up to host Murmur. Source spec: `DESIGN.md` §6.5. Companion docs: deploy script (`scripts/deploy.sh`, issue `colophon-group/murmur#19`), Cloudflare Tunnel setup (issue `colophon-group/murmur#21`).
+This runbook brings a fresh Hetzner box up to host Murmur. Source spec: `DESIGN.md` §6.5. Companion docs: deploy script (`scripts/deploy.sh`, issue `colophon-group/murmur#19`), Cloudflare Tunnel setup (`docs/cloudflare-tunnel.md`, issue `colophon-group/murmur#21`).
 
 The runbook is intentionally written to be re-runnable. Every step uses idempotent commands (`mkdir -p`, `id -u deploy >/dev/null 2>&1 || useradd ...`, `grep -q ... || echo ... >> ...`). If step N fails partway, fix it and re-run from step N — earlier steps are no-ops the second time.
 
@@ -215,7 +215,9 @@ If the SSH login fails with "Permission denied (publickey)", recheck `authorized
 
 ## 5. Cloudflare Tunnel
 
-This step depends on the Cloudflare Tunnel artifacts produced by issue `colophon-group/murmur#21` (D4 — `cloudflared` config + tunnel registration). Follow that issue's PR description for the full tunnel setup; the steps below are the box-side install only.
+This step depends on the Cloudflare Tunnel artifacts produced by issue `colophon-group/murmur#21` (D4 — `cloudflared` config + tunnel registration). The full tunnel setup (Cloudflare-side: tunnel creation in Zero Trust, public hostname route, GH secret) lives in `docs/cloudflare-tunnel.md`. Run that runbook first, then return here for the box-side install.
+
+The box-side install below is an *alternative* to the Docker sidecar described in `docs/cloudflare-tunnel.md` step 4 (which is the production topology per `DESIGN.md` §6.2). Pick one path per box: do **not** run both concurrently — they will register two connectors against the same tunnel, both pointed at `localhost:8080`. The systemd path here is convenient when bootstrapping the box before D1's compose stack lands; once D1 is deployed, disable the systemd service (`sudo systemctl disable --now cloudflared`) and let the Docker sidecar take over.
 
 **Action.**
 
@@ -269,7 +271,7 @@ These secrets are consumed by the deploy workflow built in issue `colophon-group
 | Secret | Source | Used for |
 |---|---|---|
 | `MURMUR_TOKEN` | random 32-byte hex (`openssl rand -hex 32`) | written into `/home/deploy/.env` as the bearer token Murmur expects on `/pull` and `/submit` |
-| `CLOUDFLARE_TUNNEL_TOKEN` | Cloudflare dashboard → Zero Trust → Tunnels → `murmur` → "Install connector" → "Use a token" | passed to `cloudflared service install` (step 5) |
+| `CLOUDFLARE_TUNNEL_TOKEN` | Cloudflare dashboard → Zero Trust → Tunnels → `murmur` → "Install connector" → "Use a token". Full procedure: `docs/cloudflare-tunnel.md` step 1. | passed to `cloudflared service install` (step 5) and to the Docker sidecar (`docs/cloudflare-tunnel.md` step 4) |
 | `HETZNER_SSH_KEY` | private half of the `hetzner_deploy` keypair (step 4) | GH Actions uses this to `ssh deploy@<box-ipv4>` and run `scripts/deploy.sh` |
 
 **Action.**
