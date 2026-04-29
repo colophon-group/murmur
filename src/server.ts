@@ -3,8 +3,9 @@ import { Hono } from "hono";
 
 import type { Err } from "@murmur/contracts-types";
 
-import { bearerAuth } from "./auth/index.js";
+import { createAgentApp } from "./api/agent/index.js";
 import { createPublisherApp } from "./api/publisher/index.js";
+import { bearerAuth } from "./auth/index.js";
 
 /**
  * Options accepted by `createServer`.
@@ -24,16 +25,17 @@ export interface CreateServerOptions {
    */
   token: Buffer;
   /**
-   * Open SQLite handle. When supplied, the publisher sub-app
-   * (`src/api/publisher`) is mounted and serves `POST /pipelines`,
-   * `POST /pipelines/{id}/runs`, and `GET /runs/{run_id}`. When omitted,
-   * the publisher routes are absent and any request to those paths falls
-   * through to the 404 handler (e.g. tests that only exercise auth).
+   * Optional open `better-sqlite3` handle. When supplied, both the publisher
+   * sub-app (`src/api/publisher` — `POST /pipelines`, `POST /pipelines/{id}/runs`,
+   * `GET /runs/{run_id}`) and the agent sub-app (`src/api/agent` — `GET /work/next`,
+   * `POST /work/{claim_token}/result`) are mounted on top of the bearer-auth gate.
+   * Tests that only exercise auth/health may omit it; in that case both sub-apps
+   * are absent and any request to their paths falls through to the 404 handler.
    *
-   * The factory does NOT take ownership — callers are responsible for
-   * lifecycle. Migrations MUST have been run on the handle before
-   * `createServer` is called; the publisher sub-app assumes the schema
-   * is already in place.
+   * The factory does NOT take ownership — callers are responsible for the
+   * connection's lifecycle. Migrations MUST have been run on the handle
+   * before `createServer` is called; both sub-apps assume the schema is
+   * already in place.
    */
   db?: Database.Database;
 }
@@ -66,14 +68,13 @@ export function createServer(options: CreateServerOptions): Hono {
 
   app.get("/health", (c) => c.json({ ok: true }));
 
-  // Publisher sub-app: registered only when a DB handle was supplied.
-  // The sub-app exposes `POST /pipelines`, `POST /pipelines/{id}/runs`,
-  // and `GET /runs/{run_id}`. Mounted at `/` because each route owns
-  // its own absolute path; bearer-auth above the mount applies. See
-  // `src/api/publisher/index.ts`.
+  // Sub-apps: registered only when a DB handle was supplied. Both inherit the
+  // bearer-auth gate installed above. Publisher at `/` (each route owns its
+  // own absolute path); agent at `/work` (DESIGN.md §3.3).
   if (options.db !== undefined) {
     const publisher = createPublisherApp({ db: options.db });
     app.route("/", publisher);
+    app.route("/work", createAgentApp({ db: options.db }));
   }
 
   // 404 fallback. The body conforms to M0's `Err` envelope shape:
