@@ -25,6 +25,8 @@
   },
   "dependencies": {
     "@murmur/contracts-types": "workspace:*",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "better-sqlite3": "^12.9.0"
   },
   "devDependencies": {
