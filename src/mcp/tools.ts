@@ -21,14 +21,16 @@
  * shape `{ ok, errors?, data? }` from `@murmur/contracts-types`). There is
  * no parallel `accepted: true` shape (grep-no-accepted-key:allow — prose).
  *
- * **Auth propagation.** Tool handlers receive the HTTP request's
- * `Authorization` header from the MCP `RequestHandlerExtra.requestInfo`
- * surface (the SDK's per-request auth path) and forward it to the
- * in-process agent app via `app.request(..., { headers: ... })`. The
- * caller (`createMcpRoute`) is responsible for ensuring the bearer-auth
- * middleware has already validated the header before the request reaches
- * this layer; the forwarded header lets the agent sub-app's own
- * middleware re-validate as a defence-in-depth step.
+ * **Auth propagation.** The bearer-auth gate is enforced by the parent
+ * Hono app's `app.use('*', bearerAuth(...))` middleware (mounted in
+ * `src/server.ts`); by the time a request reaches an MCP tool handler
+ * the token is already validated. Tool handlers nonetheless forward the
+ * request's `Authorization` header to the in-process agent app via
+ * `app.request(..., { headers: ... })` — the agent sub-app currently
+ * has no app-level middleware of its own, so this forwarding is inert in
+ * the present layout, but it lets us add auth on the sub-app later (or
+ * exchange the in-process call for an out-of-process HTTP call) without
+ * a round of churn at the call sites.
  *
  * @see DESIGN.md §3.3 — agent endpoints (the wrapped HTTP routes)
  * @see DESIGN.md §3.4 — MCP server surface (the static descriptions)
