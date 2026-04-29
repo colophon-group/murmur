@@ -11,12 +11,12 @@
  * without requiring docker / a real box.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, chmodSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
 const DEPLOY_SH = join(REPO_ROOT, "scripts", "deploy.sh");
