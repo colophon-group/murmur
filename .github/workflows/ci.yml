@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: quality
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/debug/ghcr-pat-delivery')
     # Least-privilege workflow perms: the build job needs to push images to
     # GHCR, nothing else. Kept as belt-and-suspenders even though the actual
     # auth flows through the credential below.
