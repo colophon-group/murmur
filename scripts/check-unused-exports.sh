@@ -5,10 +5,13 @@
 # a non-zero exit on any reported export so it can plug into `pnpm lint` /
 # the CI quality job.
 #
-# Lines marked with `(used in module)` represent symbols only consumed inside
-# their declaring file (i.e., they could have been local). We don't fail those
-# in M1 — `noUnusedLocals` + `unused-imports/no-unused-vars` already cover the
-# in-file case from a different angle. We fail only on truly unused exports.
+# Filtering rules:
+#   - Drop `(used in module)` rows. Those are advisory: the symbol is only
+#     consumed inside its declaring file. `noUnusedLocals` already covers the
+#     in-file case from a different angle, so we don't fail those in M1.
+#   - Drop config-file default exports (`*.config.ts`, `eslint.config.js`).
+#     Those are picked up by tooling by *file path*, not by import — ts-prune
+#     can't see the consumer, so it always reports them as unused.
 
 set -euo pipefail
 
@@ -17,9 +20,16 @@ cd "$(dirname "$0")/.."
 # `ts-prune` honours tsconfig include/exclude. Run it from the repo root.
 output=$(pnpm exec ts-prune --error 2>/dev/null || true)
 
-# Filter: drop "(used in module)" rows — those are advisory, not breaking.
-# Drop blank lines.
-filtered=$(echo "$output" | grep -v '(used in module)' | grep -E '\S' || true)
+# Filter pipeline:
+#   1. Drop "used in module" advisory rows.
+#   2. Drop config-file findings (vitest.config.ts, eslint.config.js, etc.)
+#      whose default export is consumed by tooling at a file path.
+#   3. Drop blank lines.
+filtered=$(echo "$output" \
+  | grep -v '(used in module)' \
+  | grep -vE '^[A-Za-z0-9_./-]+\.config\.(ts|js|cjs|mjs):[0-9]+ - default$' \
+  | grep -vE '^eslint\.config\.(js|mjs|cjs):[0-9]+ - default$' \
+  | grep -E '\S' || true)
 
 if [ -n "$filtered" ]; then
   echo "ERROR: unused exports detected (cross-file). Either remove them or" >&2
