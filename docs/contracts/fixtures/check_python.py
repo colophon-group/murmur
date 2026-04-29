@@ -94,16 +94,21 @@ def main() -> int:
         assert isinstance(e, c.ValidationError)
         assert e.path == "" or e.path.startswith("/")
 
-    # §6 — webhook payload + headers
+    # §6 — webhook payload + headers.
+    # Body IS the composed final_output (no wrapper). run_id rides on
+    # the Idempotency-Key header. WebhookPayload is a Mapping alias.
     w = blob["6_webhook"]
-    payload = c.WebhookPayload(
-        run_id=w["body"]["run_id"],
-        pipeline_id=w["body"]["pipeline_id"],
-        pipeline_version=w["body"]["pipeline_version"],
-        completed_at=w["body"]["completed_at"],
-        final_output=w["body"]["final_output"],
-    )
-    assert w["headers"][c.HEADER_IDEMPOTENCY_KEY] == payload.run_id
+    payload: c.WebhookPayload = w["body"]
+    assert isinstance(payload, dict)
+    # Composed fields land at the top level of the body.
+    assert "canonical_name" in payload
+    assert "boards" in payload
+    # No legacy wrapper fields leak into the body.
+    assert "run_id" not in payload
+    assert "pipeline_id" not in payload
+    assert "final_output" not in payload, "body must not nest final_output under a wrapper"
+    # run_id travels as the Idempotency-Key header.
+    assert w["headers"][c.HEADER_IDEMPOTENCY_KEY].startswith("r_")
     assert w["headers"][c.HEADER_AUTHORIZATION].startswith(c.BEARER_PREFIX)
     assert w["retry_count"] == c.WEBHOOK_RETRY_COUNT
     assert w["retry_delay_ms"] == c.WEBHOOK_RETRY_DELAY_MS

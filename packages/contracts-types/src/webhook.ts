@@ -7,33 +7,30 @@
 /**
  * Body of the webhook POST.
  *
- * Headers (set by Murmur, NOT in the body):
+ * The body IS the composed `final_output` directly — no envelope, no
+ * wrapper. Per-run metadata travels in headers, not the body:
+ *
  *   - `Authorization: Bearer <MURMUR_TOKEN>`
  *   - `Idempotency-Key: <run_id>`
  *   - `Content-Type: application/json`
  *
- * `final_output` is the result of applying the pipeline's
- * `final_output.composes` rule to all subtask outputs.
+ * The body's exact shape is determined by the pipeline def's
+ * `final_output.composes` rules (§7) — it is a JSON object whose keys
+ * are pipeline-specific. This type alias names that "naked composed
+ * object" so callers can spell its intent without committing to a
+ * specific pipeline's keys.
+ *
+ * History: an earlier draft of the contract wrapped `final_output`
+ * inside a `{ run_id, pipeline_id, pipeline_version, completed_at,
+ * final_output }` envelope. The shipped sender (`src/webhook.ts`)
+ * never emitted that wrapper, and the receiver (jobseek's accept
+ * handler) was implemented against the naked shape. Issue #63
+ * reconciled the spec to match: the body is the composed object, and
+ * `run_id` is the `Idempotency-Key` header. If the publisher needs
+ * other run metadata in the future, surface it as `X-Murmur-*`
+ * headers — do not nest it inside the body.
  */
-export interface WebhookPayload {
-  /** Stable run identifier; also the value of the `Idempotency-Key` header. */
-  readonly run_id: string;
-
-  /** Pipeline def id (slug) the run was started from. */
-  readonly pipeline_id: string;
-
-  /**
-   * Pipeline-def version the run was pinned to at start. MVP: integer
-   * monotonically incremented on each `POST /pipelines` upsert.
-   */
-  readonly pipeline_version: number;
-
-  /** RFC 3339 / ISO 8601 timestamp, UTC, when Murmur composed the output. */
-  readonly completed_at: string;
-
-  /** Composed final output. Shape determined by the pipeline's `composes` rule. */
-  readonly final_output: Readonly<Record<string, unknown>>;
-}
+export type WebhookPayload = Readonly<Record<string, unknown>>;
 
 /**
  * Response shape the publisher's accept handler MUST return.
