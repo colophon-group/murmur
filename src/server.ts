@@ -1,8 +1,10 @@
+import type Database from "better-sqlite3";
 import { Hono } from "hono";
 
 import type { Err } from "@murmur/contracts-types";
 
 import { bearerAuth } from "./auth/index.js";
+import { createPublisherApp } from "./api/publisher/index.js";
 
 /**
  * Options accepted by `createServer`.
@@ -21,6 +23,19 @@ export interface CreateServerOptions {
    * before calling `createServer`.
    */
   token: Buffer;
+  /**
+   * Open SQLite handle. When supplied, the publisher sub-app
+   * (`src/api/publisher`) is mounted and serves `POST /pipelines`,
+   * `POST /pipelines/{id}/runs`, and `GET /runs/{run_id}`. When omitted,
+   * the publisher routes are absent and any request to those paths falls
+   * through to the 404 handler (e.g. tests that only exercise auth).
+   *
+   * The factory does NOT take ownership — callers are responsible for
+   * lifecycle. Migrations MUST have been run on the handle before
+   * `createServer` is called; the publisher sub-app assumes the schema
+   * is already in place.
+   */
+  db?: Database.Database;
 }
 
 /**
@@ -50,6 +65,16 @@ export function createServer(options: CreateServerOptions): Hono {
   app.use("*", bearerAuth(options.token));
 
   app.get("/health", (c) => c.json({ ok: true }));
+
+  // Publisher sub-app: registered only when a DB handle was supplied.
+  // The sub-app exposes `POST /pipelines`, `POST /pipelines/{id}/runs`,
+  // and `GET /runs/{run_id}`. Mounted at `/` because each route owns
+  // its own absolute path; bearer-auth above the mount applies. See
+  // `src/api/publisher/index.ts`.
+  if (options.db !== undefined) {
+    const publisher = createPublisherApp({ db: options.db });
+    app.route("/", publisher);
+  }
 
   // 404 fallback. The body conforms to M0's `Err` envelope shape:
   // `{ ok: false, errors: ["not_found"] }`. The string-token form is the
