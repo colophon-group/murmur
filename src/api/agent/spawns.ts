@@ -34,23 +34,6 @@ import type Database from "better-sqlite3";
 import type { SpawnsDef, SubtaskDef } from "@murmur/contracts-types";
 
 /**
- * The columns we INSERT for each spawned child. Mirrors the
- * `subtask_instances` schema in `src/db/schema.md`. `claim_token` and
- * `expires_at` default to NULL (the row is freshly `ready`, not claimed).
- */
-export interface SpawnedChildRow {
-  readonly id: string;
-  readonly run_id: string;
-  readonly subtask_id: string;
-  readonly parent_instance_id: string;
-  readonly spawn_index: number;
-  readonly status: "ready";
-  readonly input_json: string;
-  readonly created_at: string;
-  readonly updated_at: string;
-}
-
-/**
  * Compute the child input payload that the spawned subtask will see in
  * its `pull_task` (`/work/next`) response under `data.input`.
  *
@@ -142,14 +125,33 @@ export function applySpawns(
   now: string,
   mintInstanceId: () => string,
 ): ReadonlyArray<string> {
-  void db;
-  void parentInstanceId;
-  void parentRunId;
-  void parentSubtaskDef;
-  void output;
-  void now;
-  void mintInstanceId;
-  throw new Error("not implemented");
+  const spawns = parentSubtaskDef.spawns;
+  if (spawns === undefined) return [];
+
+  const elements = extractForEachArray(output, spawns.for_each);
+  if (elements === null || elements.length === 0) return [];
+
+  const insertStmt = db.prepare(INSERT_SPAWN_CHILD_SQL);
+  const ids: string[] = [];
+
+  for (let i = 0; i < elements.length; i += 1) {
+    const id = mintInstanceId();
+    const childInput = bindChildInput(spawns, elements[i]);
+    insertStmt.run({
+      id,
+      run_id: parentRunId,
+      subtask_id: spawns.template,
+      parent_instance_id: parentInstanceId,
+      spawn_index: i,
+      status: "ready",
+      input_json: JSON.stringify(childInput),
+      created_at: now,
+      updated_at: now,
+    });
+    ids.push(id);
+  }
+
+  return ids;
 }
 
 /**

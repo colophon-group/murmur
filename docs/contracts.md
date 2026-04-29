@@ -60,6 +60,7 @@ subtasks:                           # required, ≥1
     spawns:                         # optional; for dynamic instantiation
       for_each: <field-on-output>
       template: <subtask-id>
+      bind_as: <input-key>          # optional; child sees { [bind_as]: element }
     requires: [<subtask-id>, ...]   # optional; explicit DAG edges
     skip_if: { ... }                # optional; JSONLogic-style — DEFERRED for MVP
 final_output:

@@ -154,12 +154,25 @@ export function spawnChildren(
   now: string,
   mintInstanceId: () => string,
 ): ReadonlyArray<string> {
-  void db;
-  void parentInstanceId;
-  void output;
-  void now;
-  void mintInstanceId;
-  throw new Error("not implemented");
+  const parent = lookupParentForSpawn(db, parentInstanceId);
+  if (parent === null) return [];
+
+  const subtaskDef = lookupSubtaskDef(db, parent.run_id, parent.subtask_id);
+  if (subtaskDef === null) return [];
+
+  // Delegate the actual INSERTs. `applySpawns` is a pure-against-the-db
+  // helper: it does not open a transaction, and a thrown SQLite error
+  // (e.g., FK violation) propagates up so the caller's BEGIN IMMEDIATE
+  // can ROLLBACK atomically with the parent's CAS.
+  return applySpawns(
+    db,
+    parentInstanceId,
+    parent.run_id,
+    subtaskDef,
+    output,
+    now,
+    mintInstanceId,
+  );
 }
 
 /**
@@ -189,10 +202,42 @@ export function maybeFinaliseRun(
   runId: string,
   now: string,
 ): boolean {
-  void db;
-  void runId;
-  void now;
-  throw new Error("not implemented");
+  // 1. Bail out if the run is already terminal. The flip is idempotent
+  //    but we want to avoid clobbering `completed_at`.
+  const runRow = db
+    .prepare(`SELECT status FROM runs WHERE id = ?`)
+    .get(runId) as { status: string } | undefined;
+  if (runRow === undefined) return false;
+  if (runRow.status !== "running") return false;
+
+  // 2. Count non-terminal instances. Terminal states are `done`,
+  //    `skipped`, `failed`. Anything else (`pending`, `ready`,
+  //    `claimed`, plus any future status) keeps the run live.
+  const nonTerminal = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM subtask_instances
+        WHERE run_id = ?
+          AND status NOT IN ('done', 'skipped', 'failed')`,
+    )
+    .get(runId) as { c: number };
+  if (nonTerminal.c > 0) return false;
+
+  // 3. Sanity: the run must have at least one row (otherwise the
+  //    publisher created the run with no subtasks — a bug, not a
+  //    completion). Avoids flipping an empty-shell run to `completed`.
+  const total = db
+    .prepare(`SELECT COUNT(*) AS c FROM subtask_instances WHERE run_id = ?`)
+    .get(runId) as { c: number };
+  if (total.c === 0) return false;
+
+  // 4. Flip. TODO(M11 / colophon-group/murmur#19): compose
+  //    `final_output` per `final_output.composes`. TODO(M10 /
+  //    colophon-group/murmur#18): POST the webhook. Both depend on the
+  //    row being `completed`; this is the precondition.
+  db.prepare(
+    `UPDATE runs SET status = 'completed', completed_at = ? WHERE id = ?`,
+  ).run(now, runId);
+  return true;
 }
 
 /**

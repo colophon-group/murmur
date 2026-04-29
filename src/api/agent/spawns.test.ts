@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import type Database from "better-sqlite3";
 
-import type { EnvelopeResponse } from "@murmur/contracts-types";
+import type { EnvelopeResponse, SubtaskDef } from "@murmur/contracts-types";
 
 import { openDb } from "../../db/index.js";
 import { runMigrations } from "../../db/migrate.js";
@@ -26,6 +26,22 @@ import {
 import type { NextWorkData, SubmitOkData } from "./work.js";
 
 /**
+ * Look up a subtask def by id from a pipeline-def-shaped object. Throws
+ * (rather than returning `undefined`) so the test's typecheck stays
+ * strict — every test that uses this expects the def to exist.
+ */
+function findSubtask(
+  def: { subtasks: ReadonlyArray<SubtaskDef> },
+  id: string,
+): SubtaskDef {
+  const found = def.subtasks.find((s) => s.id === id);
+  if (found === undefined) {
+    throw new Error(`subtask def not found: ${id}`);
+  }
+  return found;
+}
+
+/**
  * Pipeline def used by spawn tests. `list-boards` declares
  * `spawns: { for_each, template, bind_as }`; `configure-board` is the
  * spawn template. Schemas are deliberately permissive but require the
@@ -34,7 +50,17 @@ import type { NextWorkData, SubmitOkData } from "./work.js";
 const SPAWN_PIPELINE_ID = "spawn-pipeline";
 const SPAWN_PIPELINE_VERSION = 1;
 
-const SPAWN_PIPELINE_DEF = {
+interface PipelineDefForTest {
+  readonly id: string;
+  readonly initial_input: Readonly<Record<string, unknown>>;
+  readonly subtasks: ReadonlyArray<SubtaskDef>;
+  readonly final_output: {
+    readonly composes: ReadonlyArray<string>;
+    readonly webhook: string;
+  };
+}
+
+const SPAWN_PIPELINE_DEF: PipelineDefForTest = {
   id: SPAWN_PIPELINE_ID,
   initial_input: { type: "object" },
   subtasks: [
@@ -77,7 +103,7 @@ const SPAWN_PIPELINE_DEF = {
  * `requires` the other, no `spawns:`.
  */
 const NO_SPAWN_PIPELINE_ID = "no-spawn-pipeline";
-const NO_SPAWN_PIPELINE_DEF = {
+const NO_SPAWN_PIPELINE_DEF: PipelineDefForTest = {
   id: NO_SPAWN_PIPELINE_ID,
   initial_input: { type: "object" },
   subtasks: [
@@ -296,7 +322,7 @@ describe("applySpawns", () => {
         h.db,
         "p_parent",
         "run-A",
-        SPAWN_PIPELINE_DEF.subtasks[0],
+        findSubtask(SPAWN_PIPELINE_DEF, "list-boards"),
         { boards: [{ alias: "a" }, { alias: "b" }, { alias: "c" }] },
         h.nowFn(),
         () => {
@@ -354,7 +380,7 @@ describe("applySpawns", () => {
         h.db,
         "p_first",
         "run-N",
-        NO_SPAWN_PIPELINE_DEF.subtasks[0],
+        findSubtask(NO_SPAWN_PIPELINE_DEF, "first"),
         { score: 1 },
         h.nowFn(),
         () => "child_x",
@@ -385,7 +411,7 @@ describe("applySpawns", () => {
         h.db,
         "p_parent",
         "run-D",
-        SPAWN_PIPELINE_DEF.subtasks[0],
+        findSubtask(SPAWN_PIPELINE_DEF, "list-boards"),
         { boards: [{ alias: "dup" }, { alias: "dup" }] },
         h.nowFn(),
         () => {
@@ -424,7 +450,7 @@ describe("applySpawns", () => {
         h.db,
         "p_parent",
         "run-M",
-        SPAWN_PIPELINE_DEF.subtasks[0],
+        findSubtask(SPAWN_PIPELINE_DEF, "list-boards"),
         // Note: schema would reject this in production. Defence-in-depth.
         { other: "data" },
         h.nowFn(),
@@ -458,7 +484,7 @@ describe("applySpawns", () => {
         h.db,
         "p_parent",
         "run-E",
-        SPAWN_PIPELINE_DEF.subtasks[0],
+        findSubtask(SPAWN_PIPELINE_DEF, "list-boards"),
         { boards: [] },
         h.nowFn(),
         () => "should_not_be_called",
