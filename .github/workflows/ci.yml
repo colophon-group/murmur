@@ -101,7 +101,6 @@ jobs:
         run: echo "$GHCR_PAT" | docker login ghcr.io -u viktor-shcherb --password-stdin
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
-          OWNER: ${{ github.repository_owner }}
       - name: Build & push
         if: hashFiles('Dockerfile') != ''
         uses: docker/build-push-action@v5
