@@ -27,7 +27,8 @@
     "@murmur/contracts-types": "workspace:*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "better-sqlite3": "^12.9.0"
+    "better-sqlite3": "^12.9.0",
+    "yaml": "^2.8.3"
   },
   "devDependencies": {
     "@hono/node-server": "1.13.7",
