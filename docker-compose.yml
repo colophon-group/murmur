@@ -1,0 +1,98 @@
+# docker-compose.yml — Murmur production stack on the Hetzner box.
+#
+# Source spec: DESIGN.md §6.2 (canonical compose shape) and the
+# Cloudflare Tunnel runbook (docs/cloudflare-tunnel.md).
+#
+# Topology (DESIGN.md §6.1):
+#   - One Hetzner CAX (ARM64) box.
+#   - Volume mounted at /mnt/murmur for SQLite + WAL.
+#   - No inbound port on the box; cloudflared dials out to Cloudflare's
+#     edge and ferries traffic to localhost:8080.
+#
+# Env file: docker compose auto-loads `.env` from the working directory.
+# In production that file is /home/deploy/.env (written by the deploy
+# GH Action from `production` environment secrets — D2). For local
+# rehearsal, copy `.env.example` to `.env` and fill in.
+#
+# Required env vars consumed below:
+#   OWNER                    — GitHub org that owns the GHCR image
+#   MURMUR_TOKEN             — bearer token for publishers (DESIGN §3.6)
+#   DATABASE_PATH            — absolute path inside the container
+#   CLOUDFLARE_TUNNEL_TOKEN  — base64 token from the Zero Trust dashboard
+#
+# Health verification:
+#   docker compose up -d
+#   docker compose ps               # both services should be healthy
+#   wget -q -O- http://localhost:8080/health   # → 200 within 10s
+
+services:
+  murmur:
+    # Pinned tag is `latest` per DESIGN.md §6.2; the GHCR build job
+    # (.github/workflows/ci.yml `build`) tags both `latest` and the
+    # commit SHA so pinning to a digest is a one-line change here.
+    image: ghcr.io/${OWNER}/murmur:latest
+
+    # network_mode: host matches jobseek's crawler box and lets the
+    # cloudflared sidecar reach localhost:8080 without a user-defined
+    # network (which `host` mode is incompatible with anyway).
+    network_mode: host
+
+    # Auto-restart on crash, but NOT on `docker stop` (so deploys can
+    # take the container down cleanly).
+    restart: unless-stopped
+
+    # 512 MB cap matches DESIGN.md §6.2. Murmur is a small Hono server
+    # backed by SQLite; this leaves headroom on a CAX11 (4 GB total).
+    mem_limit: 512m
+
+    environment:
+      # PORT is hard-required by src/index.ts:readPortFromEnv(); leaving
+      # it unset crashes the boot. Hard-coded 8080 because the cloudflared
+      # tunnel route in Zero Trust points at this exact port.
+      PORT: "8080"
+      # DATABASE_PATH points inside /mnt/murmur (the host volume mount).
+      # M2 (#7) writes to this path; until M2 lands, the value is set
+      # but unused.
+      DATABASE_PATH: ${DATABASE_PATH:-/mnt/murmur/murmur.db}
+      # MURMUR_TOKEN is the demo-grade bearer token (DESIGN §3.6).
+      # Required at boot once M3 (#8) lands; benign earlier.
+      MURMUR_TOKEN: ${MURMUR_TOKEN}
+      NODE_ENV: production
+
+    volumes:
+      # Single bind mount — the host's /mnt/murmur (Hetzner data volume)
+      # appears inside the container at the same path. SQLite WAL needs
+      # the same path on both sides for backup hooks (DESIGN §6.4).
+      - /mnt/murmur:/mnt/murmur
+
+    healthcheck:
+      # Compose-level healthcheck. Note: with network_mode: host, the
+      # container shares the host's network namespace, so 127.0.0.1:8080
+      # is the murmur process itself.
+      #
+      # `wget -q -O-` exits non-zero on non-2xx and discards the body.
+      # The 10s start_period covers cold boot of the Node process.
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+
+    network_mode: host
+
+    restart: unless-stopped
+
+    # `--no-autoupdate` matches the runbook (docs/cloudflare-tunnel.md)
+    # and avoids the surprise of a sidecar pulling new binaries
+    # mid-demo.
+    command: tunnel --no-autoupdate run
+
+    environment:
+      # CLOUDFLARE_TUNNEL_TOKEN is the long base64 blob copied from the
+      # Cloudflare Zero Trust dashboard. Embeds the tunnel UUID and the
+      # connector credentials. NEVER commit a real token; this file
+      # only references the env var.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
