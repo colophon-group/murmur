@@ -109,6 +109,18 @@ async function startStubServer(): Promise<StubServer> {
 /* Test harness — DB seeding helpers                                     */
 /* -------------------------------------------------------------------- */
 
+/**
+ * Pinned "now" for the seeded fixture. The dispatcher uses `nowFn` for
+ * both the `expires_at > ?` filter in the claim-resolution SQL and the
+ * `agent_actions.ts` audit timestamp; if the test relies on the real
+ * wall clock instead, every test that seeds the default 10-min TTL
+ * fails as soon as the wall clock advances past `SEEDED_NOW + 10min`
+ * (i.e. always, in CI). Pin a deterministic "now" inside the seeded
+ * TTL window for every dispatch call.
+ */
+const SEEDED_NOW = "2026-04-29T12:00:00.000Z";
+const seededNowFn = (): string => SEEDED_NOW;
+
 interface SeededClaim {
   readonly db: Database.Database;
   readonly claimToken: string;
@@ -135,7 +147,7 @@ function seedClaim(opts: SeedOptions): SeededClaim {
   const db = openDb(":memory:");
   runMigrations(db);
 
-  const now = "2026-04-29T12:00:00.000Z";
+  const now = SEEDED_NOW;
   const ttl = opts.ttlMs ?? 600_000;
   const expiresAt = new Date(Date.parse(now) + ttl).toISOString();
   const claimToken = opts.claimToken ?? "c_test";
@@ -229,6 +241,7 @@ describe("dispatchTaskTool — claim resolution", () => {
       subcommand: "probe",
       args: {},
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(false);
@@ -276,6 +289,7 @@ describe("dispatchTaskTool — claim resolution", () => {
       subcommand: "probe",
       args: {},
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(false);
@@ -295,6 +309,7 @@ describe("dispatchTaskTool — subcommand resolution", () => {
       subcommand: "no-such-subcmd",
       args: {},
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(false);
@@ -336,6 +351,7 @@ describe("dispatchTaskTool — args validation", () => {
       subcommand: "probe",
       args: { foo: { bar: 123 } },
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(false);
@@ -367,6 +383,7 @@ describe("dispatchTaskTool — proxy success path", () => {
       subcommand: "probe",
       args: { board_url: "https://example.com" },
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(true);
@@ -390,6 +407,7 @@ describe("dispatchTaskTool — proxy success path", () => {
       subcommand: "probe",
       args: {},
       bearer: "TOKEN_VALUE",
+      nowFn: seededNowFn,
     });
 
     expect(stub!.received[0]?.headers.authorization).toBe("Bearer TOKEN_VALUE");
@@ -410,6 +428,7 @@ describe("dispatchTaskTool — proxy success path", () => {
       subcommand: "probe",
       args: {},
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     const headers = stub!.received[0]!.headers;
@@ -436,6 +455,7 @@ describe("dispatchTaskTool — proxy success path", () => {
       subcommand: "probe",
       args: { board_url: "https://example.com", token: "abc" },
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     const body = stub!.received[0]!.body;
@@ -461,6 +481,7 @@ describe("dispatchTaskTool — publisher failure modes", () => {
       subcommand: "probe",
       args: {},
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(false);
@@ -491,6 +512,7 @@ describe("dispatchTaskTool — publisher failure modes", () => {
       args: {},
       bearer: "TOK",
       timeoutMs: 100,
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(false);
@@ -547,6 +569,7 @@ describe("dispatchTaskTool — publisher failure modes", () => {
       args: {},
       bearer: "TOK",
       responseCapBytes: 2 * 1024,
+      nowFn: seededNowFn,
     });
 
     expect(result.ok).toBe(false);
@@ -585,6 +608,7 @@ describe("dispatchTaskTool — audit log", () => {
       subcommand: "probe",
       args: { kind: "small" },
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     const rows = db
@@ -635,6 +659,7 @@ describe("dispatchTaskTool — audit log", () => {
       subcommand: "probe",
       args,
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     const r = db
@@ -669,6 +694,7 @@ describe("dispatchTaskTool — audit log", () => {
       subcommand: "probe",
       args: { x: 1 },
       bearer: "TOK",
+      nowFn: seededNowFn,
     });
 
     const rows = db
@@ -705,6 +731,7 @@ describe("dispatchTaskTool — connection pooling", () => {
         subcommand: "probe",
         args: {},
         bearer: "TOK",
+        nowFn: seededNowFn,
       }),
     );
 

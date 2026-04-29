@@ -94,8 +94,20 @@ export interface DispatchTaskToolOptions {
    */
   readonly responseCapBytes?: number;
   /**
-   * Override the now() function for deterministic audit timestamps.
-   * Default `() => new Date().toISOString()`.
+   * Override the now() function for deterministic timestamps. Two roles:
+   *
+   *   1. The string returned is bound into the `expires_at > ?` filter
+   *      of the claim-resolution SQL — so this seam ALSO controls the
+   *      claim-expiry comparison, not just audit-row `ts`. Tests that
+   *      seed a fixed `expires_at` MUST pin `nowFn` to a moment within
+   *      that TTL window or the dispatcher will (correctly) report
+   *      `claim_lost`.
+   *   2. The string is reused as the `agent_actions.ts` value of the
+   *      audit row, so a deterministic clock yields a deterministic
+   *      audit log.
+   *
+   * Default `() => new Date().toISOString()`. Mirrors the `nowFn` seam
+   * on M5's `createWorkRoutes` (`src/api/agent/work.ts`).
    */
   readonly nowFn?: () => string;
   /**
