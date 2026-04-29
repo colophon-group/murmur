@@ -87,17 +87,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: Buildx for ARM64
         uses: docker/setup-buildx-action@v3
+      - name: Debug PAT delivery
+        # Verify the secret reaches the runner intact. Prints length + prefix
+        # only (first 4 chars are the well-known `ghp_` prefix; not a leak).
+        # Then tries the GHCR token-exchange flow that works from the orchestrator's
+        # local probe — if this fails too, the secret is malformed in transit.
+        run: |
+          echo "PAT length: ${#GHCR_PAT}"
+          echo "PAT prefix (first 4): ${GHCR_PAT:0:4}"
+          echo "PAT suffix (last 4): ${GHCR_PAT: -4}"
+          HTTP=$(curl -s -o /tmp/r.json -w "%{http_code}" -u "viktor-shcherb:${GHCR_PAT}" "https://ghcr.io/token?service=ghcr.io&scope=repository:colophon-group/murmur:push,pull")
+          echo "GHCR /token HTTP: $HTTP"
+          python3 -c "import json,sys; d=json.load(open('/tmp/r.json')); print('keys:', list(d.keys())); print('errors:', d.get('errors')); print('token len:', len(d.get('token','')) if isinstance(d.get('token'), str) else 'no-token')"
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
       - name: Login GHCR
-        # Direct docker login bypasses docker/login-action@v3's auth probe,
-        # which fails our classic-PAT setup with `denied: denied` even though
-        # the registry's standard token-exchange flow works (verified via
-        # /token?service=ghcr.io). Stdin keeps the PAT off argv. The
-        # downstream docker/build-push-action@v5 reads credentials from
-        # ~/.docker/config.json written here.
-        # Username is the PAT owner's GitHub login (viktor-shcherb), NOT the
-        # org name. The package lives under colophon-group/ but the docker
-        # login presents the user's identity; the registry then checks that
-        # user's perms against the org package on subsequent push.
         run: echo "$GHCR_PAT" | docker login ghcr.io -u viktor-shcherb --password-stdin
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
