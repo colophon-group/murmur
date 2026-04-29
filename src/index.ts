@@ -77,11 +77,17 @@ export function readPortFromEnv(env: NodeJS.ProcessEnv): number {
  * host process's environment.
  */
 export function readMurmurTokenFromEnv(env: NodeJS.ProcessEnv): Buffer {
-  // Marker line for unimplemented interface; not executable.
-  if (env) {
-    throw new Error("not implemented");
+  const raw = env.MURMUR_TOKEN;
+  if (raw === undefined || raw === "") {
+    // The error message MUST NOT include the variable's value. We only
+    // reference the variable name so operators can diagnose without leaking
+    // a partial token (DESIGN.md §3.6, `grep-no-token-logged`).
+    throw new Error(
+      "MURMUR_TOKEN environment variable is required (DESIGN.md §3.6). " +
+        "Set MURMUR_TOKEN to the shared bearer token for this deployment.",
+    );
   }
-  throw new Error("not implemented");
+  return Buffer.from(raw, "utf8");
 }
 
 export interface ServerHandle {

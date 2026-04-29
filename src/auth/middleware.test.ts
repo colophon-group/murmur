@@ -56,6 +56,23 @@ describe("bearerAuth middleware", () => {
     expect(body).toEqual({ ok: false, errors: ["unauthorized"] });
   });
 
+  it("wrong token at the EXACT env-token length returns 401", async () => {
+    // Exercise the constant-time-compare branch (not the length-mismatch
+    // branch). The candidate is the same byte-length as TOKEN but differs
+    // at every position.
+    const app = makeApp();
+    const sameLengthDifferent = "X".repeat(TOKEN.length);
+    expect(sameLengthDifferent.length).toBe(TOKEN.length); // sanity
+
+    const response = await app.request("/protected", {
+      headers: { Authorization: `Bearer ${sameLengthDifferent}` },
+    });
+
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as EnvelopeResponse<unknown>;
+    expect(body).toEqual({ ok: false, errors: ["unauthorized"] });
+  });
+
   it("correct token runs the protected handler", async () => {
     const app = makeApp();
 
