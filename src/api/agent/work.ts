@@ -37,6 +37,7 @@ import type Database from "better-sqlite3";
 import type { Err, Ok } from "@murmur/contracts-types";
 
 import { validateAgainst } from "../../dispatch/validation.js";
+import { newInstanceId } from "../publisher/ids.js";
 
 import {
   CAS_SQL,
@@ -78,6 +79,12 @@ export interface CreateWorkRoutesOptions {
   readonly nowFn?: () => string;
   /** Returns a fresh claim token (opaque, ≥16 bytes of entropy). */
   readonly claimTokenFn?: () => string;
+  /**
+   * Returns a fresh `subtask_instances.id` for spawn children. Defaults
+   * to {@link newInstanceId} (12 random bytes hex-encoded). Tests inject
+   * a deterministic counter so spawned ids match assertions.
+   */
+  readonly instanceIdFn?: () => string;
 }
 
 /**
@@ -156,6 +163,7 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
   const ttlMs = options.ttlMs ?? DEFAULT_CLAIM_TTL_MS;
   const nowFn = options.nowFn ?? (() => nowIso());
   const claimTokenFn = options.claimTokenFn ?? freshClaimToken;
+  const instanceIdFn = options.instanceIdFn ?? newInstanceId;
 
   // Compile the prepared statements once at construction time. Re-binding
   // happens on every call but the parse step runs once.
@@ -376,11 +384,13 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
           args.truncated || resp.truncated ? 1 : 0,
         );
 
-        // Mark next ready set inside the same transaction.
+        // Spawn children FIRST so their freshly-`ready` rows are
+        // visible to `markNextReady` (DAG-following pendings that
+        // depend on the spawn template's id are advanced in the same
+        // round). Run-completion check runs LAST so it sees the new
+        // pending/ready rows that spawns just inserted.
+        spawnChildren(db, casRow.id, validation.value, now, instanceIdFn);
         markNextReady(db, casRow.run_id, now);
-
-        // M8 stub: spawn children. M10 stub: maybe finalise run.
-        spawnChildren(db, casRow.id, validation.value, now);
         maybeFinaliseRun(db, casRow.run_id, now);
 
         db.exec("COMMIT");

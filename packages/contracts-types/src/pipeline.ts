@@ -48,6 +48,13 @@ export interface SpawnsDef {
   readonly for_each: string;
   /** Subtask def id used as the template for each child instance. */
   readonly template: string;
+  /**
+   * Optional input-key name under which the child sees the for_each
+   * element. Per DESIGN.md §3.1's worked example (`bind_as: board`), the
+   * spawned subtask's `pull_task` input becomes `{ [bind_as]: <element> }`.
+   * Omitted ⇒ the child's input is the element itself (legacy shape).
+   */
+  readonly bind_as?: string;
 }
 
 export interface SubtaskDef {
