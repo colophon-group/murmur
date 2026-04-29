@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node --import tsx src/index.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && pnpm -r --if-present run typecheck",
+    "typecheck": "tsc -b packages/contracts-types && tsc --noEmit -p tsconfig.json && pnpm -r --if-present run typecheck",
     "lint": "eslint . && bash scripts/check-unused-exports.sh",
     "test": "vitest run --coverage && pnpm -r --if-present --filter='!.' run test",
     "test:unit": "vitest run",
@@ -20,6 +20,9 @@
     "grep-no-naked-eq-in-auth": "bash scripts/grep-no-naked-eq-in-auth.sh",
     "grep-uses-timingsafeequal": "bash scripts/grep-uses-timingsafeequal.sh",
     "grep-no-token-logged": "bash scripts/grep-no-secrets-logged.sh"
+  },
+  "dependencies": {
+    "@murmur/contracts-types": "workspace:*"
   },
   "devDependencies": {
     "@hono/node-server": "1.13.7",

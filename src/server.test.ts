@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import type { EnvelopeResponse } from "@murmur/contracts-types";
+
 import { createServer } from "./server.js";
 import { readPortFromEnv } from "./index.js";
 
@@ -22,15 +24,24 @@ describe("createServer", () => {
     expect(response.status).toBe(404);
   });
 
-  it("GET /unknown returns the M0 envelope shape", async () => {
+  it("GET /unknown returns the M0 Err envelope shape exactly", async () => {
     const app = createServer();
 
     const response = await app.request("/some/missing/path");
-    const body = (await response.json()) as { ok: boolean; errors: unknown };
+
+    // Type the parsed body as `EnvelopeResponse<unknown>` so that `tsc`
+    // validates this assertion against the canonical contract too — if the
+    // server's 404 body drifts from the envelope, this file fails to compile.
+    const body = (await response.json()) as EnvelopeResponse<unknown>;
 
     expect(response.status).toBe(404);
     expect(body.ok).toBe(false);
-    expect(Array.isArray(body.errors)).toBe(true);
+
+    // Pin the exact wire shape: string-token form, single `"not_found"` entry.
+    expect(body).toEqual({
+      ok: false,
+      errors: ["not_found"],
+    });
   });
 });
 
