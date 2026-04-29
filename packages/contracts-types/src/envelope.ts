@@ -2,9 +2,9 @@
  * Canonical response envelope for all Murmur agent endpoints and all
  * jobseek subcommand routes.
  *
- * Single shape — no `accepted: true` parallel envelope. Enforced repo-wide
- * via the `grep:no-accepted-key` gate on `packages/`, `apps/`, `src/`,
- * `test/` (the legacy carve-out is `_legacy/`).
+ * Single shape — no `accepted: true` parallel envelope (grep-no-accepted-key:allow — prose).
+ * Enforced repo-wide via the `grep:no-accepted-key` gate on `packages/`,
+ * `apps/`, `src/`, `test/` (the legacy carve-out is `_legacy/`).
  *
  * @see docs/contracts.md §4 — `task_tool` request/response envelope
  * @see docs/contracts.md §5 — `submit_result` validation-error shape
@@ -37,8 +37,9 @@ export interface Err {
  * before reading `data` or `errors`.
  *
  * Type-level invariant: `EnvelopeResponse<T>` is structurally exclusive
- * of `{ accepted: boolean, ... }`. The package's tests assert that an
- * `accepted`-shaped object does not satisfy this type.
+ * of `{ accepted: boolean, ... }` (grep-no-accepted-key:allow — prose).
+ * The package's tests assert that an `accepted`-shaped object does not
+ * satisfy this type.
  */
 export type EnvelopeResponse<T = unknown> = Ok<T> | Err;
 

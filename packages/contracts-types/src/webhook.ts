@@ -57,8 +57,12 @@ export interface WebhookAcceptResponse {
  *
  * This constant exists so docs and tests can reference a single source
  * of truth. `null` denotes "no expiring window — durable on writer side".
+ *
+ * The type is widened to `number | null` so a future tightening (e.g.,
+ * adopting an in-memory dedupe window in milliseconds) is a value-only
+ * change, not a type-shape break for downstream consumers.
  */
-export const WEBHOOK_DEDUPE_WINDOW_MS: null = null;
+export const WEBHOOK_DEDUPE_WINDOW_MS: number | null = null;
 
 /**
  * Number of additional delivery attempts after the first. MVP: 1 retry

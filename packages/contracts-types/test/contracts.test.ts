@@ -62,17 +62,24 @@ describe("§4 — envelope shape is the only envelope", () => {
     }
   });
 
-  it("type-level: EnvelopeResponse rejects { accepted: true }", () => {
-    // The next line is the load-bearing assertion: the legacy
-    // `{ accepted: true }` envelope shape is NOT assignable to
+  it("type-level: EnvelopeResponse rejects legacy shape", () => {
+    // The next line is the load-bearing assertion: the legacy envelope
+    // shape (banned by the §4 contract) is NOT assignable to
     // EnvelopeResponse<T>. If this comment is removed and the
     // ts-expect-error is silenced, the type system has regressed.
+    // The `grep-no-accepted-key:allow` marker tells the source-level
+    // gate that the reference on the next line is the gate's own
+    // self-test and must not trigger a CI failure.
     // @ts-expect-error — the canonical envelope is `{ ok, errors?, data? }`, never `{ accepted, ... }`.
-    const _legacy: EnvelopeResponse = { accepted: true };
+    const _legacy: EnvelopeResponse = { accepted: true }; // grep-no-accepted-key:allow
     void _legacy;
   });
 
   it("type-level: Err requires errors[]", () => {
+    // Load-bearing: proves Err's `errors` field is REQUIRED. If this
+    // ts-expect-error is silenced (e.g., `errors` becomes optional),
+    // emitters could legally return `{ ok: false }` with no diagnostic
+    // payload — breaking the §4 contract.
     // @ts-expect-error — Err.errors is required.
     const _missingErrors: Err = { ok: false };
     void _missingErrors;
