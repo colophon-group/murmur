@@ -42,6 +42,11 @@ yarn-error.log*
 coverage/
 *.lcov
 
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
 # Secrets / certs
 *.pem
 *.key
