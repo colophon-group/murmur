@@ -26,8 +26,22 @@ coverage/
 .turbo/
 .next/
 
-# Docs (not needed in runtime image; reduce attack surface and image size)
+# Docs (not needed in runtime image; reduce attack surface and image size).
+#
+# Exception — docs/contracts/pipeline-def.schema.json is loaded at runtime
+# by src/api/publisher/schema.ts (M0 boundary contract; POST /pipelines body
+# validation). Without it the container crashes on boot with
+# `ENOENT … docs/contracts/pipeline-def.schema.json` because the builder's
+# `COPY . .` honours .dockerignore. Cascading re-includes follow Docker's
+# canonical "exclude parent, re-include specific child" pattern: each parent
+# along the path must be un-excluded before its child can be re-included.
+# Sibling files (docs/*.md, docs/contracts/fixtures/) remain excluded.
 docs/
+!docs/
+docs/*
+!docs/contracts/
+docs/contracts/*
+!docs/contracts/pipeline-def.schema.json
 *.md
 !README.md
 
