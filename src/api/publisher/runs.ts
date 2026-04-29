@@ -92,14 +92,17 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
        FROM runs WHERE id = ?`,
   );
   // Join through subtask_instances so the audit row carries `subtask_id`
-  // — agent_actions itself only knows `instance_id`.
+  // — agent_actions itself only knows `instance_id`. Order primarily by
+  // `ts ASC` per issue #17 (the audit-trail consumer reads
+  // chronologically); fall back to `id ASC` so two rows logged in the
+  // same millisecond keep insertion order.
   const selectActions = db.prepare(
     `SELECT a.id, a.instance_id, i.subtask_id, a.ts, a.kind, a.subcommand,
             a.args_json, a.response_json, a.truncated
        FROM agent_actions a
        JOIN subtask_instances i ON i.id = a.instance_id
       WHERE i.run_id = ?
-      ORDER BY a.id ASC`,
+      ORDER BY a.ts ASC, a.id ASC`,
   );
 
   app.get("/runs/:run_id", (c) => {
