@@ -276,15 +276,19 @@ function isEnvelope(value: unknown): value is EnvelopeResponse<unknown> {
 /* ---------------------------- pull_task ---------------------------------- */
 
 function registerPullTask(server: McpServer, agentApp: Hono): void {
+  // Zero-argument tool: when `inputSchema` is omitted, the SDK's
+  // `ToolCallback<undefined>` signature is `(extra) => CallToolResult`
+  // (NOT `(args, extra)`). See @modelcontextprotocol/sdk's
+  // `BaseToolCallback` discriminating on `Args extends undefined`.
   server.registerTool(
     TOOL_PULL_TASK,
     {
       description: PULL_TASK_DESCRIPTION,
       // No inputSchema: zero-argument tool.
     },
-    async (_args, extra) => {
+    async (extra) => {
       const auth = authHeaderFromExtra(extra);
-      const env = await callAgentApp(agentApp, "GET", "/work/next", auth);
+      const env = await callAgentApp(agentApp, "GET", "/next", auth);
       return envelopeResult(env);
     },
   );
@@ -301,7 +305,11 @@ function registerSubmitResult(server: McpServer, agentApp: Hono): void {
     },
     async (args, extra) => {
       const auth = authHeaderFromExtra(extra);
-      const path = `/work/${encodeURIComponent(args.claim)}/result`;
+      // The agent sub-app handles `POST /:claim_token/result` at its
+      // root — `/work` is the parent-mount prefix. Calls via
+      // `app.request(...)` go straight to the sub-app, so we omit the
+      // `/work` prefix here.
+      const path = `/${encodeURIComponent(args.claim)}/result`;
       const body: { result: unknown; notes?: string } = { result: args.result };
       if (args.notes !== undefined) body.notes = args.notes;
       const env = await callAgentApp(agentApp, "POST", path, auth, body);
