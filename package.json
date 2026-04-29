@@ -22,7 +22,9 @@
     "grep-no-token-logged": "bash scripts/grep-no-secrets-logged.sh"
   },
   "dependencies": {
-    "@murmur/contracts-types": "workspace:*"
+    "@murmur/contracts-types": "workspace:*",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1"
   },
   "devDependencies": {
     "@hono/node-server": "1.13.7",
