@@ -292,6 +292,14 @@ When all subtasks of a run complete, Murmur POSTs the composed
 
 ### 6.1 Request
 
+The HTTP body **is** the composed `final_output` — no envelope, no
+wrapper around it. Per-run metadata travels in headers:
+
+- `Authorization: Bearer <MURMUR_TOKEN>` — same token as everywhere else.
+- `Idempotency-Key: <run_id>` — stable run identifier; the publisher
+  dedupes on this key (see §6.3).
+- `Content-Type: application/json`.
+
 ```
 POST /api/murmur/accept HTTP/1.1
 Host: jobseek.colophon-group.org
@@ -299,14 +307,16 @@ Authorization: Bearer Z2hzX01VUk1VUl9ERU1PXzAxX1RPS0VOX1ZBTFVF
 Idempotency-Key: r_8a91d4
 Content-Type: application/json
 
-{
-  "run_id": "r_8a91d4",
-  "pipeline_id": "jobseek-add-company",
-  "pipeline_version": 7,
-  "completed_at": "2026-04-29T11:07:40.123Z",
-  "final_output": { /* §7 */ }
-}
+{ /* the composed final_output — see §7 for the composition rules and
+     a worked example. Keys are pipeline-specific. */ }
 ```
+
+The TS type `WebhookPayload` (in `@murmur/contracts-types`) names the
+body as `Readonly<Record<string, unknown>>` — its concrete shape is
+determined by the pipeline def's `final_output.composes`. If future
+publishers need additional metadata (pipeline id, version, completion
+timestamp), surface it as `X-Murmur-*` headers — never nest it inside
+the body.
 
 ### 6.2 Auth
 

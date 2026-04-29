@@ -32,6 +32,8 @@ interface AllSevenFixture {
     errors: ValidationError[];
   };
   "6_webhook": {
+    // Body is the composed final_output directly — no wrapper. The
+    // type alias `WebhookPayload` names this naked shape.
     headers: Record<string, string>;
     body: WebhookPayload;
     retry_count: number;
@@ -126,22 +128,32 @@ describe("docs/contracts/fixtures/all-seven.json", () => {
     }
   });
 
-  it("§6 — webhook idempotency key matches run_id", () => {
+  it("§6 — webhook headers carry run_id and bearer; constants match spec", () => {
     const w = fixture["6_webhook"];
-    expect(w.headers["Idempotency-Key"]).toBe(w.body.run_id);
+    // run_id travels as the Idempotency-Key header (NOT in the body).
+    expect(w.headers["Idempotency-Key"]).toMatch(/^r_/);
     expect(w.headers["Authorization"]).toMatch(/^Bearer /);
+    expect(w.headers["Content-Type"]).toBe("application/json");
     expect(w.retry_count).toBe(1);
     expect(w.retry_delay_ms).toBe(30_000);
     expect(w.dedupe_window_ms).toBeNull();
   });
 
-  it("§6 — webhook body is a WebhookPayload", () => {
+  it("§6 — webhook body is the composed final_output directly (no wrapper)", () => {
     const w = fixture["6_webhook"];
-    expect(w.body.run_id).toBeDefined();
-    expect(w.body.pipeline_id).toBe("jobseek-add-company");
-    expect(typeof w.body.pipeline_version).toBe("number");
-    expect(w.body.completed_at).toMatch(/Z$/);
-    expect(typeof w.body.final_output).toBe("object");
+    // The body IS the composed object: keys come from the pipeline's
+    // `final_output.composes` rules, not a fixed envelope.
+    expect(typeof w.body).toBe("object");
+    expect(w.body).not.toBeNull();
+    expect(w.body["canonical_name"]).toBe("ExampleCo");
+    expect(Array.isArray(w.body["boards"])).toBe(true);
+    // The legacy wrapper fields MUST NOT appear at the body's top level.
+    // They were the spec drift this fixture used to encode.
+    expect(w.body["run_id"]).toBeUndefined();
+    expect(w.body["pipeline_id"]).toBeUndefined();
+    expect(w.body["pipeline_version"]).toBeUndefined();
+    expect(w.body["completed_at"]).toBeUndefined();
+    expect(w.body["final_output"]).toBeUndefined();
   });
 
   it("§7 — composes fixture covers wildcard, prefix, rename, cartesian, flatten", () => {

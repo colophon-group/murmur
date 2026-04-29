@@ -153,39 +153,34 @@
   },
 
   "6_webhook": {
+    "_comment": "Body is the composed final_output directly — no wrapper. run_id travels in the Idempotency-Key header.",
     "headers": {
       "Authorization": "Bearer Z2hzX01VUk1VUl9ERU1PXzAxX1RPS0VOX1ZBTFVFXzAxMjM0NTY3OA",
       "Idempotency-Key": "r_8a91d4",
       "Content-Type": "application/json"
     },
     "body": {
-      "run_id": "r_8a91d4",
-      "pipeline_id": "jobseek-add-company",
-      "pipeline_version": 7,
-      "completed_at": "2026-04-29T11:07:40.123Z",
-      "final_output": {
-        "canonical_name": "ExampleCo",
-        "canonical_website": "https://example.co",
-        "slug": "exampleco",
-        "description": "Example company.",
-        "industry_ids": ["software", "saas"],
-        "boards": [
-          {
-            "alias": "careers",
-            "board_url": "https://job-boards.greenhouse.io/exampleco",
-            "provider": "greenhouse",
-            "outcome": "configured",
-            "monitor_type": "greenhouse",
-            "monitor_config": { "token": "exampleco" },
-            "scraper_type": "greenhouse",
-            "scraper_config": {},
-            "verdict": "ok",
-            "per_field": {}
-          }
-        ],
-        "kb_entries": [],
-        "case_studies": []
-      }
+      "canonical_name": "ExampleCo",
+      "canonical_website": "https://example.co",
+      "slug": "exampleco",
+      "description": "Example company.",
+      "industry_ids": ["software", "saas"],
+      "boards": [
+        {
+          "alias": "careers",
+          "board_url": "https://job-boards.greenhouse.io/exampleco",
+          "provider": "greenhouse",
+          "outcome": "configured",
+          "monitor_type": "greenhouse",
+          "monitor_config": { "token": "exampleco" },
+          "scraper_type": "greenhouse",
+          "scraper_config": {},
+          "verdict": "ok",
+          "per_field": {}
+        }
+      ],
+      "kb_entries": [],
+      "case_studies": []
     },
     "retry_count": 1,
     "retry_delay_ms": 30000,

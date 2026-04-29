@@ -109,17 +109,17 @@ WEBHOOK_RETRY_DELAY_MS: Final[int] = 30_000
 WEBHOOK_DEDUPE_WINDOW_MS: Final[None] = None  # durable on writer side
 
 
-@dataclass(frozen=True)
-class WebhookPayload:
-    """Body of the webhook POST. Headers (Authorization, Idempotency-Key,
-    Content-Type) are not part of this dataclass — they are set on the
-    HTTP request directly."""
-
-    run_id: str
-    pipeline_id: str
-    pipeline_version: int
-    completed_at: str
-    final_output: Mapping[str, Any]
+# The webhook body is the composed `final_output` directly — no
+# envelope, no wrapper. Per-run metadata travels in headers
+# (`Authorization`, `Idempotency-Key`, `Content-Type`). See
+# `docs/contracts.md` §6.1.
+#
+# `WebhookPayload` is a type alias (not a dataclass) because the body's
+# concrete shape is determined by the pipeline def's `final_output.composes`
+# and varies per pipeline. The previous wrapper dataclass was a spec
+# drift — the shipped sender (`src/webhook.ts`) never emitted that
+# shape; reconciled in issue #63.
+WebhookPayload = Mapping[str, Any]
 
 
 # ---------------------------------------------------------------------------
