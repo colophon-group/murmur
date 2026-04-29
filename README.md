@@ -43,10 +43,40 @@ src/                      Murmur server (Hono + node-server)
   server.ts               HTTP app factory
   index.ts                Boot: read PORT, bind socket
   logger.ts               Tiny structured logger (JSON-line to stderr)
+  db/                     SQLite layer (open helper, migrations, schema doc)
+    index.ts              `openDb(path)` — sets WAL/synchronous/foreign_keys pragmas
+    migrate.ts            Forward-only migrations runner
+    cli.ts                `pnpm migrate` entry point
+    schema.md             Canonical schema reference
+    migrations/*.sql      Versioned schema files (forward-only; see policy below)
 packages/contracts-types/ M0 contract types (envelope, headers, pipeline, ...)
 scripts/                  CI gate scripts (grep-all, check-unused-exports, ...)
 docs/                     Boundary contracts + bootstrap runbooks
 ```
+
+## Database migrations
+
+Murmur uses SQLite (WAL mode) at `DATABASE_PATH`. Apply the schema with:
+
+```bash
+# against DATABASE_PATH (default ./murmur.db)
+pnpm migrate
+
+# against an in-memory DB (smoke-test only — no persistence)
+pnpm migrate:memory
+```
+
+The migration set lives in `src/db/migrations/*.sql`, one file per version.
+The runner records applied versions in `_migrations` and is **idempotent**:
+running `pnpm migrate` twice in a row applies zero migrations the second time.
+
+**Migrations are forward-only.** Once a file is committed and applied to any
+environment, it is immutable — the runner identifies migrations by numeric
+prefix, so editing an applied file silently desyncs deployed databases. To
+change the schema, add a new file with the next version number.
+
+The canonical schema reference is [`src/db/schema.md`](src/db/schema.md).
+Any change to a migration must be reflected there in the same PR.
 
 ## Development process
 
