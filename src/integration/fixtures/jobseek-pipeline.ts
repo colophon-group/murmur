@@ -61,7 +61,7 @@ export function buildJobseekPipeline(
   opts: BuildJobseekPipelineOptions,
 ): PipelineDef {
   const { apiBase, webhookUrl } = opts;
-  const pipelineId = opts.pipelineId ?? "jobseek/add-company";
+  const pipelineId = opts.pipelineId ?? "jobseek-add-company";
 
   return {
     id: pipelineId,
