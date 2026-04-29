@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type Database from "better-sqlite3";
 
@@ -270,7 +270,59 @@ describe("Concurrency stress: atomic claim has no duplicates", () => {
 
       // Seed 10 ready subtasks, all on the same run for simplicity.
       const ids = Array.from({ length: 10 }, (_, i) => `t${i}`);
-      seedRun(h.db, "run-S", ids, h.nowFn(), { readyIds: ids });
+
+      // The default test pipeline only declares `first` and `second`;
+      // for this test we install a parallel pipeline that declares
+      // every t0..t9. The agent app reads pipelines by joining via
+      // run_id, so we register a fresh pipeline + run.
+      const stressPipelineId = "stress-pipeline";
+      const stressDef = {
+        id: stressPipelineId,
+        subtasks: ids.map((id) => ({
+          id,
+          instructions: `do ${id}`,
+          output_schema: {
+            type: "object",
+            properties: { ok: { type: "boolean" } },
+            required: ["ok"],
+            additionalProperties: false,
+          },
+        })),
+      };
+      h.db
+        .prepare(
+          `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
+           VALUES (?, 1, ?, ?, ?)`,
+        )
+        .run(
+          stressPipelineId,
+          JSON.stringify(stressDef),
+          h.nowFn(),
+          h.nowFn(),
+        );
+      h.db
+        .prepare(
+          `INSERT INTO runs
+             (id, pipeline_id, pipeline_version, status, initial_input_json,
+              webhook_url, created_at)
+           VALUES (?, ?, 1, 'running', '{}', 'https://example.test/webhook', ?)`,
+        )
+        .run("run-S", stressPipelineId, h.nowFn());
+
+      let i = 0;
+      for (const subtaskId of ids) {
+        const created = new Date(
+          new Date(h.nowFn()).getTime() + i,
+        ).toISOString();
+        h.db
+          .prepare(
+            `INSERT INTO subtask_instances
+               (id, run_id, subtask_id, status, input_json, created_at, updated_at)
+             VALUES (?, ?, ?, 'ready', '{}', ?, ?)`,
+          )
+          .run(`run-S-${subtaskId}`, "run-S", subtaskId, created, created);
+        i += 1;
+      }
 
       const calls: Promise<{
         status: number;
@@ -522,6 +574,187 @@ describe("POST /work/{claim_token}/result", () => {
       expect(actions.some((a) => a.kind === "claim")).toBe(true);
     } finally {
       h.db.close();
+    }
+  });
+});
+
+/* ---------- Error envelope edge cases ---------- */
+
+describe("POST /work/{claim_token}/result — input-shape edges", () => {
+  it("with malformed JSON body → { ok: false, errors: ['bad_json'] }", async () => {
+    const h = makeHarness();
+    try {
+      const response = await h.app.request("/c_anything/result", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{not json",
+      });
+      const parsed = (await response.json()) as EnvelopeResponse<unknown>;
+      expect(response.status).toBe(400);
+      expect(parsed).toEqual({ ok: false, errors: ["bad_json"] });
+    } finally {
+      h.db.close();
+    }
+  });
+
+  it("with body missing `result` key → { ok: false, errors: ['bad_request'] }", async () => {
+    const h = makeHarness();
+    try {
+      seedRun(h.db, "run-A", ["first", "second"], h.nowFn());
+      const claim = await getJson<NextWorkData>(h.app, "/next");
+      if (!claim.body.ok || !claim.body.data) throw new Error("expected claim");
+      const token = claim.body.data.claim;
+
+      const response = await h.app.request(`/${token}/result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: "no result key" }),
+      });
+      const parsed = (await response.json()) as EnvelopeResponse<unknown>;
+      expect(response.status).toBe(400);
+      expect(parsed).toEqual({ ok: false, errors: ["bad_request"] });
+    } finally {
+      h.db.close();
+    }
+  });
+});
+
+describe("/work/next pipeline-def drift", () => {
+  it("returns 500 pipeline_not_found if the run's pipeline def is missing the subtask", async () => {
+    const h = makeHarness();
+    try {
+      // Insert a run pointing at a pipeline whose def lacks the subtask we
+      // queue. This simulates schema drift between run-start and now.
+      const driftDef = { id: "drift", subtasks: [] };
+      h.db
+        .prepare(
+          `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
+           VALUES (?, 1, ?, ?, ?)`,
+        )
+        .run("drift", JSON.stringify(driftDef), h.nowFn(), h.nowFn());
+      h.db
+        .prepare(
+          `INSERT INTO runs
+             (id, pipeline_id, pipeline_version, status, initial_input_json,
+              webhook_url, created_at)
+           VALUES ('run-D', 'drift', 1, 'running', '{}',
+                   'https://example.test/webhook', ?)`,
+        )
+        .run(h.nowFn());
+      h.db
+        .prepare(
+          `INSERT INTO subtask_instances
+             (id, run_id, subtask_id, status, input_json, created_at, updated_at)
+           VALUES ('run-D-x', 'run-D', 'unknown-subtask', 'ready', '{}', ?, ?)`,
+        )
+        .run(h.nowFn(), h.nowFn());
+
+      const response = await h.app.request("/next", { method: "GET" });
+      expect(response.status).toBe(500);
+      const body = (await response.json()) as EnvelopeResponse<unknown>;
+      expect(body).toEqual({ ok: false, errors: ["pipeline_not_found"] });
+    } finally {
+      h.db.close();
+    }
+  });
+});
+
+/* ---------- Audit truncation ---------- */
+
+describe("audit log truncation (DESIGN.md §3.6, 4 KB cap)", () => {
+  it("agent_actions row is marked truncated=1 when args_json > 4 KB", async () => {
+    // Use a permissive output schema that accepts large payloads.
+    const db = openDb(":memory:");
+    runMigrations(db);
+    const def = {
+      id: "big-pipeline",
+      subtasks: [
+        {
+          id: "first",
+          instructions: "go",
+          // No `additionalProperties: false` so a huge `pad` field is accepted.
+          output_schema: { type: "object" },
+        },
+      ],
+    };
+    const now = "2026-04-29T12:00:00.000Z";
+    db.prepare(
+      `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
+       VALUES (?, 1, ?, ?, ?)`,
+    ).run("big-pipeline", JSON.stringify(def), now, now);
+    db.prepare(
+      `INSERT INTO runs
+         (id, pipeline_id, pipeline_version, status, initial_input_json,
+          webhook_url, created_at)
+       VALUES ('run-B', 'big-pipeline', 1, 'running', '{}',
+               'https://example.test/webhook', ?)`,
+    ).run(now);
+    db.prepare(
+      `INSERT INTO subtask_instances
+         (id, run_id, subtask_id, status, input_json, created_at, updated_at)
+       VALUES ('run-B-first', 'run-B', 'first', 'ready', '{}', ?, ?)`,
+    ).run(now, now);
+
+    const app = createAgentApp({ db, nowFn: () => now });
+    try {
+      const claim = await getJson<NextWorkData>(app, "/next");
+      if (!claim.body.ok || !claim.body.data) throw new Error("expected claim");
+      const token = claim.body.data.claim;
+
+      // Build a result whose JSON encoding exceeds the 4 KB cap.
+      const padding = "x".repeat(8 * 1024);
+      const submit = await postJson<SubmitOkData>(
+        app,
+        `/${token}/result`,
+        { result: { pad: padding } },
+      );
+      expect(submit.body.ok).toBe(true);
+
+      const action = db
+        .prepare(
+          `SELECT truncated FROM agent_actions
+             WHERE instance_id = 'run-B-first' AND kind = 'submit_result'`,
+        )
+        .get() as { truncated: number } | undefined;
+      expect(action?.truncated).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/* ---------- Default seams (no clock/RNG override) ---------- */
+
+describe("default seams", () => {
+  it("createAgentApp without nowFn/claimTokenFn uses real defaults and still issues claims", async () => {
+    // Exercises the default-fallback branches for `nowFn` and
+    // `claimTokenFn` (i.e. `freshClaimToken` + `nowIso`).
+    const db = openDb(":memory:");
+    runMigrations(db);
+    db.prepare(
+      `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      TEST_PIPELINE_ID,
+      TEST_PIPELINE_VERSION,
+      JSON.stringify(TEST_PIPELINE_DEF),
+      new Date().toISOString(),
+      new Date().toISOString(),
+    );
+    const app = createAgentApp({ db });
+    seedRun(db, "run-default", ["first", "second"], new Date().toISOString());
+    try {
+      const response = await app.request("/next", { method: "GET" });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as EnvelopeResponse<NextWorkData>;
+      expect(body.ok).toBe(true);
+      if (body.ok && body.data) {
+        // The default `freshClaimToken` prefixes with `c_`.
+        expect(body.data.claim.startsWith("c_")).toBe(true);
+        expect(body.data.claim.length).toBeGreaterThan(8);
+      }
+    } finally {
+      db.close();
     }
   });
 });

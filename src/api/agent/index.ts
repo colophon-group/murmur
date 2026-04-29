@@ -31,10 +31,3 @@ export function createAgentApp(options: CreateAgentAppOptions): Hono {
   return createWorkRoutes(options);
 }
 
-export type {
-  CasOkRow,
-  ClaimedRow,
-  NextWorkData,
-  SubmitBody,
-  SubmitOkData,
-} from "./work.js";

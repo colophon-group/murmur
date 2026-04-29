@@ -45,17 +45,77 @@ import type Database from "better-sqlite3";
  * @returns the list of instance ids that were promoted to `ready`
  */
 export function markNextReady(
-  // The bodies will land in step 6. Keeping the placeholder signature here
-  // means the test file can import the symbol against an unimplemented
-  // contract per AGENTS.md step 4.
   db: Database.Database,
   runId: string,
   now: string,
 ): ReadonlyArray<string> {
-  void db;
-  void runId;
-  void now;
-  throw new Error("not implemented");
+  // 1. Read the pipeline def to get each subtask's `requires`.
+  const pipelineRow = db
+    .prepare(
+      `SELECT pipelines.def_json AS def_json
+         FROM pipelines
+         JOIN runs ON runs.pipeline_id = pipelines.id
+        WHERE runs.id = ?`,
+    )
+    .get(runId) as { def_json: string } | undefined;
+  if (pipelineRow === undefined) return [];
+
+  let def: PipelineDefForLifecycle;
+  try {
+    def = JSON.parse(pipelineRow.def_json) as PipelineDefForLifecycle;
+  } catch {
+    return [];
+  }
+
+  // 2. The set of subtask_ids that have at least one done instance on
+  //    this run. Used to test `requires` satisfaction.
+  const doneRows = db
+    .prepare(
+      `SELECT DISTINCT subtask_id FROM subtask_instances
+        WHERE run_id = ? AND status = 'done'`,
+    )
+    .all(runId) as ReadonlyArray<{ subtask_id: string }>;
+  const doneSet = new Set(doneRows.map((r) => r.subtask_id));
+
+  // 3. For each pending instance on this run, check if every entry in
+  //    its subtask def's `requires` is satisfied; if so, flip to ready.
+  const pending = db
+    .prepare(
+      `SELECT id, subtask_id FROM subtask_instances
+        WHERE run_id = ? AND status = 'pending'`,
+    )
+    .all(runId) as ReadonlyArray<{ id: string; subtask_id: string }>;
+
+  const update = db.prepare(
+    `UPDATE subtask_instances
+        SET status = 'ready', updated_at = ?
+      WHERE id = ? AND status = 'pending'`,
+  );
+
+  const promoted: string[] = [];
+  for (const row of pending) {
+    const subtaskDef = def.subtasks.find((s) => s.id === row.subtask_id);
+    if (subtaskDef === undefined) continue;
+    const requires = subtaskDef.requires ?? [];
+    const allDone = requires.every((r) => doneSet.has(r));
+    if (allDone) {
+      update.run(now, row.id);
+      promoted.push(row.id);
+    }
+  }
+  return promoted;
+}
+
+/**
+ * Local mirror of just the pipeline-def fields {@link markNextReady} cares
+ * about. Avoids a tight coupling to the (still-evolving) authoritative
+ * `PipelineDef` type while keeping the code typed.
+ */
+interface PipelineDefForLifecycle {
+  readonly subtasks: ReadonlyArray<{
+    readonly id: string;
+    readonly requires?: ReadonlyArray<string>;
+  }>;
 }
 
 /**
