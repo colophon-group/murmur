@@ -1,0 +1,92 @@
+# Deploy Murmur to Hetzner. Triggered after CI succeeds on main.
+#
+# Source spec: DESIGN.md §6.3, issue #19.
+#
+# Trigger model:
+#   - `workflow_run`: kicks off after `CI` completes successfully on
+#     `main`. We only deploy what CI built; if CI fails, deploy never
+#     runs (gate inside the job on `conclusion == 'success'`).
+#   - `workflow_dispatch`: manual override so the operator can re-deploy
+#     after secrets-only changes (no code commit) or roll forward.
+#
+# Concurrency: `deploy-main` with `cancel-in-progress: false` — never
+# kill an in-flight deploy mid-restart.
+#
+# Secrets resolve from the `production` environment (DESIGN §6.3).
+# Required: MURMUR_TOKEN, CLOUDFLARE_TUNNEL_TOKEN, HETZNER_SSH_KEY,
+# HETZNER_HOST, GHCR_PAT, OWNER. The CI build job already publishes
+# `ghcr.io/${OWNER}/murmur:latest` — this workflow only ferries the
+# compose file + deploy.sh and triggers a pull on the box.
+#
+# Action SHA pins (mirrors jobseek/apps/crawler deploy):
+#   appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634   # v0.1.7
+#   appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2   # v1
+#   actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd      # v6
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `environment: production` is what makes the production-env secrets
+    # available to this job. Required reviewers/wait-timer rules can be
+    # added later in repo settings without changing this file.
+    environment: production
+    # Gate: only deploy if the upstream CI run succeeded. For
+    # `workflow_dispatch`, `workflow_run` is null so we always proceed.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout (for compose + deploy.sh)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Copy deploy files to box
+        uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: deploy
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          # `source: "a,b"` (comma-separated) per scp-action docs; the
+          # paths are relative to the workspace. `strip_components: 1`
+          # drops the leading `scripts/` so deploy.sh lands at
+          # /home/deploy/deploy.sh (compose stays at /home/deploy/
+          # docker-compose.yml).
+          source: docker-compose.yml,scripts/deploy.sh
+          target: /home/deploy/
+          strip_components: 1
+          # Note: docker-compose.yml at repo root has no leading dir;
+          # scp-action preserves it as-is. strip_components=1 only
+          # affects scripts/deploy.sh (→ deploy.sh on the box).
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: deploy
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          # `envs:` whitelist — only these names are forwarded into the
+          # remote shell. Names only; values come from the matching
+          # `env:` block below. NEVER list a secret name in `script:`.
+          envs: OWNER,GHCR_PAT,MURMUR_TOKEN,CLOUDFLARE_TUNNEL_TOKEN
+          script: bash /home/deploy/deploy.sh
+        env:
+          # `OWNER` is fixed to the GH repo org so the GHCR image path
+          # in docker-compose.yml resolves correctly.
+          OWNER: ${{ github.repository_owner }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          MURMUR_TOKEN: ${{ secrets.MURMUR_TOKEN }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
