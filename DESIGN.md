@@ -276,7 +276,7 @@ Subtasks are pure decisions: `instructions + input → output`. No side effects 
 
 ### 3.3 Server endpoints (agent-facing, behind MCP)
 
-- `GET /work/next` — atomically claim the oldest unclaimed subtask instance across all pipelines, or 204. Implementation: single statement `UPDATE subtask_instances SET claim_token=?, expires_at=? WHERE id=(SELECT id FROM subtask_instances WHERE claim_token IS NULL AND status='ready' ORDER BY created_at LIMIT 1) RETURNING …` inside `BEGIN IMMEDIATE` on a WAL-mode SQLite. No SELECT-then-UPDATE race.
+- `GET /work/next` — atomically claim the oldest unclaimed subtask instance across all pipelines, or 204. Implementation: single statement `UPDATE subtask_instances SET claim_token=?, expires_at=? WHERE id=(SELECT id FROM subtask_instances WHERE claim_token IS NULL AND status='ready' ORDER BY created_at LIMIT 1) RETURNING …` inside `BEGIN IMMEDIATE` on a WAL-mode SQLite. No SELECT-then-UPDATE race. Accepts an optional `?run_id=…` query param; when supplied, the inner SELECT adds `AND run_id = ?` so the agent only picks up subtasks of that run (used by Claude-Code-driven flows that drive a single run end-to-end without consuming unrelated stale work — issue #75). Without the param, the legacy global FIFO applies.
 - `POST /work/{claim_token}/result` — submit a structured result. Validates against the subtask's `output_schema` and the claim is consumed atomically: `UPDATE subtask_instances SET result=?, status='done' WHERE claim_token=? AND status='claimed' AND expires_at>now() RETURNING …`. If the row no longer matches (TTL expired, already submitted), the call returns `{accepted: false, reason: 'claim_lost'}` and the agent's submission is discarded.
 
 **Claim semantics (MVP):**
@@ -297,7 +297,7 @@ No retries on schema-validation failure for MVP — the run fails.
 
 Three static tools, fixed for the lifetime of the connection:
 
-- `pull_task()` → `{ instructions, input, output_schema, claim }` or `null`.
+- `pull_task({ run_id?: string })` → `{ instructions, input, output_schema, claim }` or `null`. `run_id` is optional; when supplied, the claim is restricted to ready subtasks of that run (issue #75 — drives a single run end-to-end without picking up unrelated queued work). Forwards to `GET /work/next?run_id=…`.
 - `submit_result(claim, result, notes?)` → `{ accepted: true } | { accepted: false, errors: [...] }`. `notes` is an optional free-text reflection persisted in the audit log alongside the structured `result`.
 - `task_tool(subcommand: string, claim: string, args?: object)` → `string | object` — universal dispatcher. Invokes a publisher-declared subcommand for a claim (see §3.1). `claim` is required (no session-based fallback in MVP). Static description (visible to the host's tool catalog):
 
