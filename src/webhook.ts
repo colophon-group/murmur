@@ -58,10 +58,15 @@ export const DEFAULT_WEBHOOK_RETRY_DELAY_MS = 30 * 1000;
 
 /**
  * Default per-attempt HTTP timeout. The publisher should ack quickly;
- * a slow webhook receiver eats throughput. 15s matches the dispatcher's
- * publisher-call timeout in M7.
+ * a slow webhook receiver eats throughput. The accept handler in
+ * jobseek-murmur-shim does a defense-in-depth `rerunProbes` step that
+ * spawns one Python subprocess per board (Playwright + httpx + crawler
+ * tree on a cold venv); empirically that takes ~20s for a 1-board run,
+ * which busts the original 15s budget. 60s gives ~3x headroom and
+ * still keeps a misbehaving receiver from holding murmur's delivery
+ * worker for very long.
  */
-export const DEFAULT_WEBHOOK_REQUEST_TIMEOUT_MS = 15 * 1000;
+export const DEFAULT_WEBHOOK_REQUEST_TIMEOUT_MS = 60 * 1000;
 
 /**
  * Minimal HTTP-response shape this module needs. Defined locally so
