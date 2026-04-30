@@ -1,13 +1,19 @@
 /**
- * `GET /runs/{run_id}` route handler.
+ * `GET /runs/{run_id}` and `GET /runs` route handlers.
  *
- * Returns the publisher-facing run status: the run's current status,
- * its final output (when completed), and the per-subtask audit trail.
- * Each `agent_actions` row's `args_json`/`response_json` payloads are
- * truncated per `./truncate.ts` so the response stays scannable for a
- * long-running pipeline.
+ * `GET /runs/{run_id}` returns the publisher-facing run status: the
+ * run's current status, its final output (when completed), and the
+ * per-subtask audit trail. Each `agent_actions` row's
+ * `args_json`/`response_json` payloads are truncated per `./truncate.ts`
+ * so the response stays scannable for a long-running pipeline.
+ *
+ * `GET /runs` lists runs filtered by `status`, `pipeline_id`, and
+ * arbitrary `initial_input.<field>` equality predicates against the
+ * `initial_input_json` blob, paginated by `limit`/`offset`. See the
+ * companion section in `docs/contracts.md`.
  *
  * @see DESIGN.md §3.2 — GET /runs/{run_id}
+ * @see colophon-group/murmur#76 — GET /runs (list)
  */
 
 import type Database from "better-sqlite3";
@@ -84,6 +90,49 @@ interface AgentActionRow {
 }
 
 /**
+ * One row returned by `GET /runs`. A trimmed projection of `runs` —
+ * just enough for an agent to disambiguate a natural-language request
+ * (e.g. *"add Stripe to jobseek"*) into a concrete `run_id`.
+ */
+export interface RunListItem {
+  readonly run_id: string;
+  readonly pipeline_id: string;
+  readonly status: string;
+  readonly initial_input: unknown;
+  readonly created_at: string;
+  readonly webhook_status: string | null;
+}
+
+/**
+ * Body shape returned by `GET /runs` on success. Empty `runs` array
+ * is the documented "no matches" outcome — never 404.
+ */
+export interface RunListView {
+  readonly runs: ReadonlyArray<RunListItem>;
+}
+
+/**
+ * Hard server-side cap on `?limit=`. Callers asking for more silently
+ * receive at most this many rows. Sized for the demo: a single user's
+ * pending-run carousel never exceeds a handful.
+ */
+export const RUN_LIST_MAX_LIMIT = 100;
+
+/**
+ * Default `?limit=` when the caller omits the param.
+ */
+export const RUN_LIST_DEFAULT_LIMIT = 25;
+
+/**
+ * Whitelist regex for the `<field>` segment of an
+ * `initial_input.<field>=<value>` query param. The field name is
+ * interpolated (with the `$.` JSON-Pointer prefix) into the SQL via
+ * `JSON_EXTRACT`, so anything outside this charset would open the
+ * door to SQL injection. The value side stays bound.
+ */
+export const RUN_LIST_INITIAL_INPUT_FIELD_RE = /^[A-Za-z0-9_]+$/;
+
+/**
  * Mount the `GET /runs/{run_id}` route onto the given Hono sub-app.
  *
  * Routes:
@@ -113,6 +162,8 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
       WHERE i.run_id = ?
       ORDER BY a.ts ASC, a.id ASC`,
   );
+
+  mountRunListRoute(app, db);
 
   app.get("/runs/:run_id", (c) => {
     const runId = c.req.param("run_id");
@@ -171,5 +222,38 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
         };
     const ok: Ok<RunStatusView> = { ok: true, data: view };
     return c.json(ok, 200);
+  });
+}
+
+/**
+ * Mount the `GET /runs` (list) route onto the given Hono sub-app.
+ *
+ * Query params (all optional):
+ *   - `status` — exact match against `runs.status`.
+ *   - `pipeline_id` — exact match.
+ *   - `initial_input.<field>` — equality against
+ *     `JSON_EXTRACT(initial_input_json, '$.<field>')`. `<field>` MUST
+ *     match {@link RUN_LIST_INITIAL_INPUT_FIELD_RE}; otherwise 400.
+ *     Multiple `initial_input.*` params are AND-combined.
+ *   - `limit` — integer in `[1, RUN_LIST_MAX_LIMIT]`. Values above the
+ *     cap are clamped silently. Default {@link RUN_LIST_DEFAULT_LIMIT}.
+ *   - `offset` — non-negative integer. Default 0.
+ *
+ * Response:
+ *   - 200 `{ ok: true, data: { runs: RunListItem[] } }`. `runs` may be
+ *     empty (NEVER 404 on an empty result set).
+ *   - 400 `{ ok: false, errors: [...] }` on malformed params.
+ *
+ * Auth is inherited from the bearer-auth middleware mounted at the
+ * server root by `createServer`; this handler does not re-check.
+ *
+ * @param app the publisher sub-app.
+ * @param db the open SQLite handle.
+ */
+export function mountRunListRoute(app: Hono, db: Database.Database): void {
+  // Interface-first stub. Replaced in the implementation commit.
+  void db;
+  app.get("/runs", () => {
+    throw new Error("not implemented");
   });
 }
