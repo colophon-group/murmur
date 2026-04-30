@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { readMurmurTokenFromEnv } from "./index.js";
+import { readDatabasePathFromEnv, readMurmurTokenFromEnv } from "./index.js";
 
 /**
  * Path to `src/index.ts`, computed relative to this test file. Used by the
@@ -75,6 +75,26 @@ describe("readMurmurTokenFromEnv", () => {
     expect(() =>
       readMurmurTokenFromEnv({ MURMUR_TOKEN: "" } as NodeJS.ProcessEnv),
     ).toThrow(/MURMUR_TOKEN/);
+  });
+});
+
+describe("readDatabasePathFromEnv", () => {
+  it("returns the path when DATABASE_PATH is set", () => {
+    expect(
+      readDatabasePathFromEnv({
+        DATABASE_PATH: "/mnt/murmur/murmur.db",
+      } as NodeJS.ProcessEnv),
+    ).toBe("/mnt/murmur/murmur.db");
+  });
+
+  it("returns undefined when DATABASE_PATH is absent (smoke-image mode)", () => {
+    expect(readDatabasePathFromEnv({} as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it("throws referencing DATABASE_PATH when set to empty string", () => {
+    expect(() =>
+      readDatabasePathFromEnv({ DATABASE_PATH: "" } as NodeJS.ProcessEnv),
+    ).toThrow(/DATABASE_PATH/);
   });
 });
 

@@ -27,6 +27,8 @@ import { serve, type ServerType } from "@hono/node-server";
 
 import type Database from "better-sqlite3";
 
+import { openDb } from "./db/index.js";
+import { runMigrations } from "./db/migrate.js";
 import { log } from "./logger.js";
 import { createServer } from "./server.js";
 import { ClaimSweeper } from "./sweeper.js";
@@ -99,6 +101,34 @@ export function readMurmurTokenFromEnv(env: NodeJS.ProcessEnv): Buffer {
   return Buffer.from(raw, "utf8");
 }
 
+/**
+ * Read `DATABASE_PATH` from a `process.env`-shaped object.
+ *
+ * @returns the path as a non-empty string, or `undefined` when the var is
+ *   absent. An absent var is treated as "no DB" so the bare-bones smoke
+ *   image (health-only) still boots — the publisher and agent sub-apps
+ *   simply do not mount in that case.
+ * @throws Error if the var is set to the empty string (operator typo —
+ *   fail fast rather than silently disable the publisher routes).
+ *
+ * Pure function (takes `env` as input rather than reading `process.env`
+ * directly) so unit tests can exercise the parsing without mutating the
+ * host process's environment.
+ */
+export function readDatabasePathFromEnv(
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const raw = env.DATABASE_PATH;
+  if (raw === undefined) return undefined;
+  if (raw === "") {
+    throw new Error(
+      "DATABASE_PATH environment variable must be a non-empty filesystem path " +
+        "(or absent to run health-only). Got empty string.",
+    );
+  }
+  return raw;
+}
+
 export interface ServerHandle {
   close(): Promise<void>;
 }
@@ -168,8 +198,26 @@ export function startServer(
 export async function main(): Promise<ServerHandle> {
   const port = readPortFromEnv(process.env);
   const token = readMurmurTokenFromEnv(process.env);
-  const handle = startServer(port, token);
-  log.info("server.listening", { port });
+  const dbPath = readDatabasePathFromEnv(process.env);
+
+  // Open the SQLite handle and run forward-only migrations BEFORE binding
+  // the port. The publisher/agent routes assume the schema is already in
+  // place (see `createServer` JSDoc). Doing this synchronously up-front
+  // means the server only starts answering requests once the DB is ready;
+  // `process.exit(1)` on any failure keeps a half-migrated boot from
+  // serving 5xxs forever.
+  let db: Database.Database | undefined;
+  if (dbPath !== undefined) {
+    db = openDb(dbPath);
+    const result = runMigrations(db);
+    log.info("db.migrations_applied", {
+      applied: result.applied.length,
+      skipped: result.skipped.length,
+    });
+  }
+
+  const handle = startServer(port, token, db);
+  log.info("server.listening", { port, db: dbPath !== undefined });
   return handle;
 }
 
