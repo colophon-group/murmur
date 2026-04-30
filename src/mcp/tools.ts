@@ -64,7 +64,7 @@ import type { EnvelopeResponse } from "@murmur/contracts-types";
  * sentence. Stable for the demo; do not change without a DESIGN.md update.
  */
 export const PULL_TASK_DESCRIPTION =
-  "Atomically claim the oldest unclaimed subtask instance across all pipelines. Returns `{ instructions, input, output_schema, claim }` or `null` when the queue is empty. Use the returned `claim` for any subsequent `task_tool` and `submit_result` calls.";
+  "Atomically claim the oldest unclaimed subtask instance. Pass `run_id` to scope the pickup to a specific run (useful for driving one pipeline end-to-end without touching unrelated queued work). Without `run_id`, picks the oldest ready subtask across all pipelines. Returns `{ instructions, input, output_schema, claim }` or `null` when the (filtered) queue is empty. Use the returned `claim` for any subsequent `task_tool` and `submit_result` calls.";
 
 /**
  * `submit_result` description (DESIGN.md §3.4 second bullet).
@@ -90,6 +90,28 @@ export const TOOL_TASK_TOOL = "task_tool";
 /* -------------------------------------------------------------------------- */
 /*  Tool input schemas (Zod, surfaces as JSON Schema in tools/list)           */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * `pull_task` accepts an optional `run_id` to scope the claim pickup to
+ * a specific run (issue #75). Omitted → global FIFO over all ready
+ * subtasks (legacy default). Supplied → only ready subtasks of that run
+ * are eligible.
+ *
+ * The agent flow for a single demoed pipeline is:
+ *   1. Operator triggers `POST /pipelines/{id}/runs` and shares `run_id`.
+ *   2. Agent calls `pull_task({ run_id })` on a loop until it returns null.
+ * This avoids interleaving with stale work from earlier rehearsals or
+ * unrelated publishers without resorting to a server restart.
+ */
+export const PULL_TASK_INPUT_SHAPE = {
+  run_id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional run id (e.g. `r_abc123`) to restrict the claim pickup to a specific run. Omit to claim the oldest ready subtask across all pipelines.",
+    ),
+} as const;
 
 /**
  * `submit_result` requires `claim` and `result`; `notes` is optional.
@@ -279,19 +301,59 @@ function isEnvelope(value: unknown): value is EnvelopeResponse<unknown> {
 /* ---------------------------- pull_task ---------------------------------- */
 
 function registerPullTask(server: McpServer, agentApp: Hono): void {
-  // Zero-argument tool: when `inputSchema` is omitted, the SDK's
-  // `ToolCallback<undefined>` signature is `(extra) => CallToolResult`
-  // (NOT `(args, extra)`). See @modelcontextprotocol/sdk's
-  // `BaseToolCallback` discriminating on `Args extends undefined`.
+  // Issue #75: `pull_task` now accepts an optional `run_id`. With
+  // `inputSchema`, the SDK's `ToolCallback` signature becomes
+  // `(args, extra) => CallToolResult` (vs the no-schema variant's
+  // single-arg `(extra) =>`).
+  //
+  // Defensive shape-check: under some test harnesses (and historical
+  // SDK versions when the schema is fully-optional) the callback can
+  // be invoked with a single `(extra)` parameter instead of
+  // `(args, extra)` — the heads-up from issue #75. We discriminate by
+  // checking whether the first param has `RequestHandlerExtra`-like
+  // slots (`requestId`, `sendNotification`); if so, treat it as
+  // `extra` and `args` is `{}` (legacy zero-arg call). Otherwise
+  // it's the real Zod-parsed `args` object and `maybeExtra` is the
+  // `extra`.
   server.registerTool(
     TOOL_PULL_TASK,
     {
       description: PULL_TASK_DESCRIPTION,
-      // No inputSchema: zero-argument tool.
+      inputSchema: PULL_TASK_INPUT_SHAPE,
     },
-    async (extra) => {
+    async (
+      maybeArgs: { run_id?: string | undefined },
+      maybeExtra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+    ) => {
+      // Defensive shape-check (issue #75 heads-up): some in-process test
+      // harnesses invoke a fully-optional-schema callback with a single
+      // `(extra)` argument instead of `(args, extra)`. Discriminate by
+      // checking whether the first param carries `RequestHandlerExtra`
+      // marker slots — if so, treat it as `extra` and synthesise an
+      // empty `args` object.
+      const firstArgIsExtra =
+        maybeArgs !== null &&
+        typeof maybeArgs === "object" &&
+        ("requestId" in maybeArgs || "sendNotification" in maybeArgs);
+      const args = firstArgIsExtra
+        ? ({} as { run_id?: string | undefined })
+        : maybeArgs;
+      const extra = firstArgIsExtra
+        ? (maybeArgs as unknown as RequestHandlerExtra<
+            ServerRequest,
+            ServerNotification
+          >)
+        : maybeExtra;
       const auth = authHeaderFromExtra(extra);
-      const env = await callAgentApp(agentApp, "GET", "/next", auth);
+      const runId =
+        typeof args.run_id === "string" && args.run_id.length > 0
+          ? args.run_id
+          : null;
+      const path =
+        runId === null
+          ? "/next"
+          : `/next?run_id=${encodeURIComponent(runId)}`;
+      const env = await callAgentApp(agentApp, "GET", path, auth);
       return envelopeResult(env);
     },
   );

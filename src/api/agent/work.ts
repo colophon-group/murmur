@@ -42,6 +42,7 @@ import { newInstanceId } from "../publisher/ids.js";
 
 import {
   CAS_SQL,
+  CLAIM_BY_RUN_SQL,
   CLAIM_SQL,
   INSERT_AGENT_ACTION_SQL,
   INSERT_RESULT_SQL,
@@ -176,6 +177,7 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
   // Compile the prepared statements once at construction time. Re-binding
   // happens on every call but the parse step runs once.
   const claimStmt = db.prepare(CLAIM_SQL);
+  const claimByRunStmt = db.prepare(CLAIM_BY_RUN_SQL);
   const casStmt = db.prepare(CAS_SQL);
   const insertResultStmt = db.prepare(INSERT_RESULT_SQL);
   const insertActionStmt = db.prepare(INSERT_AGENT_ACTION_SQL);
@@ -193,6 +195,22 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
     const now = nowFn();
     const expiresAt = new Date(Date.parse(now) + ttlMs).toISOString();
     const token = claimTokenFn();
+
+    // Optional run-scope filter (issue #75). When supplied, the inner
+    // SELECT in `CLAIM_BY_RUN_SQL` adds `AND run_id = ?` so the agent
+    // only picks up rows from that run. Useful for end-to-end demos
+    // where stale claims from earlier rehearsals would otherwise be
+    // FIFO'd ahead of the fresh run's pre-verify. The default (no
+    // param, or empty string) preserves the legacy global-FIFO
+    // behaviour. We treat an empty string the same as missing — Hono's
+    // `c.req.query` returns `undefined` for missing params, but a bare
+    // `?run_id=` URL surfaces as `""` and an empty filter would never
+    // match a real run id.
+    const runIdParam = c.req.query("run_id");
+    const runIdFilter =
+      typeof runIdParam === "string" && runIdParam.length > 0
+        ? runIdParam
+        : null;
 
     // Atomic claim: BEGIN IMMEDIATE upgrades to RESERVED on entry; the
     // single UPDATE … RETURNING below is the only write inside the txn.
@@ -212,7 +230,12 @@ export function createWorkRoutes(options: CreateWorkRoutesOptions): Hono {
     db.exec("BEGIN IMMEDIATE");
     let row: ClaimedRow | undefined;
     try {
-      row = claimStmt.get(token, expiresAt, now) as ClaimedRow | undefined;
+      row =
+        runIdFilter === null
+          ? (claimStmt.get(token, expiresAt, now) as ClaimedRow | undefined)
+          : (claimByRunStmt.get(token, expiresAt, now, runIdFilter) as
+              | ClaimedRow
+              | undefined);
       db.exec("COMMIT");
     } catch (err) {
       try {

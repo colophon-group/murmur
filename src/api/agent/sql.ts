@@ -75,6 +75,39 @@ RETURNING id, run_id, subtask_id, input_json, claim_token, expires_at
 `;
 
 /**
+ * Run-scoped variant of {@link CLAIM_SQL}. Same shape; the inner SELECT
+ * adds `AND run_id = ?` so an agent can drive a specific run end-to-end
+ * without picking up unrelated stale claims when the global queue has
+ * other runs interleaved (common during demo rehearsals or when several
+ * publishers share the murmur instance — issue #75).
+ *
+ * Bound parameters:
+ *   1. claim_token (TEXT, fresh)
+ *   2. expires_at  (TEXT, RFC 3339 UTC; now + ttlMs)
+ *   3. updated_at  (TEXT, RFC 3339 UTC; now)
+ *   4. run_id      (TEXT, the run to scope the pickup to)
+ *
+ * The `(status='ready', created_at)` part of the inner SELECT predicate
+ * matches `idx_subtask_instances_ready`; SQLite's planner tolerates the
+ * extra `AND run_id = ?` filter without dropping the index — the
+ * predicate is evaluated row-by-row off the leaf, which is fine because
+ * the leaf is already narrowed to `status='ready' AND claim_token IS NULL`.
+ */
+export const CLAIM_BY_RUN_SQL = `
+UPDATE subtask_instances
+   SET claim_token = ?,
+       expires_at  = ?,
+       status      = 'claimed',
+       updated_at  = ?
+ WHERE id = (
+   SELECT id FROM subtask_instances
+    WHERE claim_token IS NULL AND status = 'ready' AND run_id = ?
+    ORDER BY created_at LIMIT 1
+ )
+RETURNING id, run_id, subtask_id, input_json, claim_token, expires_at
+`;
+
+/**
  * Atomic CAS submit. Bound parameters:
  *   1. updated_at  (TEXT, RFC 3339 UTC; now)
  *   2. claim_token (TEXT, the agent-supplied token)
