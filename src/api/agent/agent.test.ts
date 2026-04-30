@@ -759,6 +759,169 @@ describe("default seams", () => {
   });
 });
 
+/* ---------- run_id-scoped claim (issue #75) ---------- */
+
+describe("GET /work/next?run_id=... — scope claim to a specific run", () => {
+  /**
+   * Helper: seed a second pipeline + run (the default `TEST_PIPELINE_DEF`
+   * only declares `first` / `second`; the run-scope tests need a separate
+   * subtask id so we can probe pipeline-def lookup with a parallel run).
+   * Returns nothing; the caller observes via `/work/next`.
+   */
+  function seedSecondPipelineAndRun(
+    db: Database.Database,
+    runId: string,
+    subtaskId: string,
+    createdAt: string,
+  ): void {
+    const pipelineId = `${runId}-pipe`;
+    const def = {
+      id: pipelineId,
+      subtasks: [
+        {
+          id: subtaskId,
+          instructions: `do ${subtaskId}`,
+          output_schema: {
+            type: "object",
+            properties: { ok: { type: "boolean" } },
+            required: ["ok"],
+            additionalProperties: false,
+          },
+        },
+      ],
+    };
+    db.prepare(
+      `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
+       VALUES (?, 1, ?, ?, ?)`,
+    ).run(pipelineId, JSON.stringify(def), createdAt, createdAt);
+    db.prepare(
+      `INSERT INTO runs
+         (id, pipeline_id, pipeline_version, status, initial_input_json,
+          webhook_url, created_at)
+       VALUES (?, ?, 1, 'running', '{}', 'https://example.test/webhook', ?)`,
+    ).run(runId, pipelineId, createdAt);
+    db.prepare(
+      `INSERT INTO subtask_instances
+         (id, run_id, subtask_id, status, input_json, created_at, updated_at)
+       VALUES (?, ?, ?, 'ready', '{}', ?, ?)`,
+    ).run(`${runId}-${subtaskId}`, runId, subtaskId, createdAt, createdAt);
+  }
+
+  it("with no `run_id` claims oldest ready row globally (legacy behaviour)", async () => {
+    const h = makeHarness();
+    try {
+      // Two runs: run-OLD seeded first (older created_at), run-NEW seeded
+      // second (newer). Without run_id, the legacy global FIFO must pick
+      // run-OLD's `first` ahead of run-NEW.
+      const oldNow = "2026-04-29T12:00:00.000Z";
+      const newNow = "2026-04-29T12:00:01.000Z";
+      seedRun(h.db, "run-OLD", ["first", "second"], oldNow);
+      seedRun(h.db, "run-NEW", ["first", "second"], newNow);
+
+      const { status, body } = await getJson<NextWorkData>(h.app, "/next");
+      expect(status).toBe(200);
+      if (!body.ok || !body.data) throw new Error("expected claim");
+      // The claim's projected payload doesn't include run_id, but we can
+      // verify by reading back from the DB which instance was claimed.
+      const claimed = h.db
+        .prepare(
+          `SELECT run_id FROM subtask_instances WHERE claim_token = ?`,
+        )
+        .get(body.data.claim) as { run_id: string };
+      expect(claimed.run_id).toBe("run-OLD");
+    } finally {
+      h.db.close();
+    }
+  });
+
+  it("with `run_id=r_X` claims oldest ready row whose run_id == r_X, ignoring older rows from other runs", async () => {
+    const h = makeHarness();
+    try {
+      // Two runs: run-OLD is older + globally first in FIFO; run-NEW is
+      // newer. Asking for run-NEW's id MUST skip run-OLD even though it's
+      // older.
+      const oldNow = "2026-04-29T12:00:00.000Z";
+      const newNow = "2026-04-29T12:00:01.000Z";
+      seedRun(h.db, "run-OLD", ["first", "second"], oldNow);
+      seedRun(h.db, "run-NEW", ["first", "second"], newNow);
+
+      const { status, body } = await getJson<NextWorkData>(
+        h.app,
+        "/next?run_id=run-NEW",
+      );
+      expect(status).toBe(200);
+      if (!body.ok || !body.data) throw new Error("expected claim");
+      const claimed = h.db
+        .prepare(
+          `SELECT run_id, subtask_id FROM subtask_instances WHERE claim_token = ?`,
+        )
+        .get(body.data.claim) as { run_id: string; subtask_id: string };
+      expect(claimed.run_id).toBe("run-NEW");
+      expect(claimed.subtask_id).toBe("first");
+
+      // run-OLD's `first` must remain `ready` (not claimed by this call).
+      const oldStatus = h.db
+        .prepare(
+          `SELECT status FROM subtask_instances WHERE id = 'run-OLD-first'`,
+        )
+        .get() as { status: string };
+      expect(oldStatus.status).toBe("ready");
+    } finally {
+      h.db.close();
+    }
+  });
+
+  it("with `run_id=r_unknown` returns { ok: true, data: null }", async () => {
+    const h = makeHarness();
+    try {
+      // Even with a populated global queue, an unknown run_id matches no
+      // rows — must return null, not the default-FIFO row.
+      seedRun(h.db, "run-OLD", ["first"], h.nowFn());
+
+      const { status, body } = await getJson<NextWorkData | null>(
+        h.app,
+        "/next?run_id=r_unknown",
+      );
+      expect(status).toBe(200);
+      expect(body).toEqual({ ok: true, data: null });
+
+      // run-OLD's row stays ready (not consumed).
+      const row = h.db
+        .prepare(
+          `SELECT status FROM subtask_instances WHERE id = 'run-OLD-first'`,
+        )
+        .get() as { status: string };
+      expect(row.status).toBe("ready");
+    } finally {
+      h.db.close();
+    }
+  });
+
+  it("works across distinct pipelines — run_id filter is independent of pipeline_id", async () => {
+    // Sanity-check: the inner SELECT filters on run_id only, so two runs
+    // belonging to different pipelines are still distinguishable. This
+    // mirrors the demo scenario where a stale rehearsal run from
+    // pipeline-A and a fresh user-driven run on pipeline-B share the
+    // queue.
+    const h = makeHarness();
+    try {
+      const oldNow = "2026-04-29T12:00:00.000Z";
+      const newNow = "2026-04-29T12:00:01.000Z";
+      seedRun(h.db, "run-OLD", ["first"], oldNow);
+      seedSecondPipelineAndRun(h.db, "run-NEW", "alpha", newNow);
+
+      const { body } = await getJson<NextWorkData>(
+        h.app,
+        "/next?run_id=run-NEW",
+      );
+      if (!body.ok || !body.data) throw new Error("expected claim");
+      expect(body.data.instructions).toBe("do alpha");
+    } finally {
+      h.db.close();
+    }
+  });
+});
+
 /* ---------- Envelope grep gate ---------- */
 
 describe("envelope grep gate", () => {

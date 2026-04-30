@@ -237,7 +237,15 @@ describe("MCP server — pull_task delegates to /work/next", () => {
   it("`pull_task` MCP call delegates to `/work/next` and returns the same shape (envelope intact)", async () => {
     const h = await makeInMemoryHarness();
     try {
-      const result = await h.client.callTool({ name: TOOL_PULL_TASK });
+      // Pass `arguments: {}` so the SDK's input-schema validator accepts
+      // the call (issue #75 added an optional `run_id` to the schema; the
+      // SDK requires `arguments` to be an object even when all fields
+      // are optional — passing `{}` is semantically identical to omitting
+      // arguments and exercises the same legacy global-FIFO path).
+      const result = await h.client.callTool({
+        name: TOOL_PULL_TASK,
+        arguments: {},
+      });
       // The handler emits both a structuredContent (envelope) and a
       // matching textual rendering. We assert against the structured
       // form — that's the contract the host actually consumes.
@@ -275,7 +283,11 @@ describe("MCP server — pull_task delegates to /work/next", () => {
     await client.connect(clientTransport);
 
     try {
-      const result = await client.callTool({ name: TOOL_PULL_TASK });
+      // See note above about `arguments: {}` and the optional `run_id`.
+      const result = await client.callTool({
+        name: TOOL_PULL_TASK,
+        arguments: {},
+      });
       const envelope = result.structuredContent as EnvelopeResponse<unknown>;
       expect(envelope.ok).toBe(true);
       if (!envelope.ok) throw new Error("unreachable");
@@ -293,7 +305,10 @@ describe("MCP server — submit_result delegates to /work/{claim}/result", () =>
     const h = await makeInMemoryHarness();
     try {
       // First claim a task to obtain a claim token.
-      const pull = await h.client.callTool({ name: TOOL_PULL_TASK });
+      const pull = await h.client.callTool({
+        name: TOOL_PULL_TASK,
+        arguments: {},
+      });
       const pullEnv = pull.structuredContent as EnvelopeResponse<{
         claim: string;
       }>;
@@ -336,6 +351,116 @@ describe("MCP server — submit_result delegates to /work/{claim}/result", () =>
       expect(envelope.ok).toBe(false);
       if (envelope.ok) throw new Error("unreachable");
       expect(envelope.errors).toContain("claim_lost");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("MCP server — pull_task with run_id filter (issue #75)", () => {
+  /**
+   * Build a harness that seeds two ready runs: an older "run-OLD" and a
+   * newer "run-NEW", both on the default test pipeline (so the projected
+   * payload is the same `Do the first thing.`). Without `run_id`, the
+   * legacy global FIFO would pick run-OLD; with `run_id: 'run-NEW'`, the
+   * agent must skip run-OLD and claim run-NEW's row.
+   */
+  async function makeTwoRunHarness(): Promise<{
+    client: Client;
+    db: Database.Database;
+    cleanup(): Promise<void>;
+  }> {
+    const fixture = setupDb();
+    const oldNow = "2026-04-29T11:59:00.000Z";
+    const newNow = "2026-04-29T12:00:00.000Z";
+
+    function seed(runId: string, createdAt: string): void {
+      fixture.db
+        .prepare(
+          `INSERT INTO runs
+             (id, pipeline_id, pipeline_version, status, initial_input_json,
+              webhook_url, created_at)
+           VALUES (?, ?, ?, 'running', '{}', 'https://example.test/webhook', ?)`,
+        )
+        .run(runId, TEST_PIPELINE_ID, TEST_PIPELINE_VERSION, createdAt);
+      fixture.db
+        .prepare(
+          `INSERT INTO subtask_instances
+             (id, run_id, subtask_id, status, input_json, created_at, updated_at)
+           VALUES (?, ?, ?, 'ready', '{}', ?, ?)`,
+        )
+        .run(`${runId}-first`, runId, "first", createdAt, createdAt);
+    }
+    seed("run-OLD", oldNow);
+    seed("run-NEW", newNow);
+
+    const agentApp = createAgentApp({ db: fixture.db });
+    const server = new McpServer({ name: "murmur-test", version: "0.0.0" });
+    registerMcpTools(server, { agentApp });
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    await server.connect(s);
+    const client = new Client(
+      { name: "murmur-test-client", version: "0.0.0" },
+      { capabilities: {} },
+    );
+    await client.connect(c);
+    return {
+      client,
+      db: fixture.db,
+      async cleanup() {
+        await client.close();
+        await server.close();
+        fixture.db.close();
+      },
+    };
+  }
+
+  it("`pull_task({ run_id: 'run-NEW' })` claims only that run's work, skipping older rows from other runs", async () => {
+    const h = await makeTwoRunHarness();
+    try {
+      const result = await h.client.callTool({
+        name: TOOL_PULL_TASK,
+        arguments: { run_id: "run-NEW" },
+      });
+      const envelope = result.structuredContent as EnvelopeResponse<{
+        instructions: string;
+        claim: string;
+      }>;
+      expect(envelope.ok).toBe(true);
+      if (!envelope.ok || envelope.data === undefined || envelope.data === null) {
+        throw new Error("expected claim");
+      }
+      // Verify by reading back from the DB which run was claimed.
+      const claimed = h.db
+        .prepare(
+          `SELECT run_id FROM subtask_instances WHERE claim_token = ?`,
+        )
+        .get(envelope.data.claim) as { run_id: string };
+      expect(claimed.run_id).toBe("run-NEW");
+
+      // run-OLD's row remains ready — not picked up despite being older.
+      const oldRow = h.db
+        .prepare(
+          `SELECT status FROM subtask_instances WHERE id = 'run-OLD-first'`,
+        )
+        .get() as { status: string };
+      expect(oldRow.status).toBe("ready");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("`pull_task({ run_id: 'r_unknown' })` returns null even when the global queue is non-empty", async () => {
+    const h = await makeTwoRunHarness();
+    try {
+      const result = await h.client.callTool({
+        name: TOOL_PULL_TASK,
+        arguments: { run_id: "r_unknown" },
+      });
+      const envelope = result.structuredContent as EnvelopeResponse<unknown>;
+      expect(envelope.ok).toBe(true);
+      if (!envelope.ok) throw new Error("unreachable");
+      expect(envelope.data).toBeNull();
     } finally {
       await h.cleanup();
     }
