@@ -251,9 +251,117 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
  * @param db the open SQLite handle.
  */
 export function mountRunListRoute(app: Hono, db: Database.Database): void {
-  // Interface-first stub. Replaced in the implementation commit.
-  void db;
-  app.get("/runs", () => {
-    throw new Error("not implemented");
+  app.get("/runs", (c) => {
+    // Hono returns query params as Record<string, string> for first-only
+    // wins; that's fine for our scalar params. We re-read the URL when we
+    // need to walk the full set of `initial_input.*` keys.
+    const url = new URL(c.req.url);
+    const params = url.searchParams;
+
+    // --- Numeric params -----------------------------------------------
+    const limitRaw = params.get("limit");
+    let limit = RUN_LIST_DEFAULT_LIMIT;
+    if (limitRaw !== null) {
+      const parsed = parseStrictInt(limitRaw);
+      if (parsed === null || parsed < 1) {
+        const err: Err = { ok: false, errors: ["limit_invalid"] };
+        return c.json(err, 400);
+      }
+      // Silent clamp at the server-side cap (per issue scope).
+      limit = Math.min(parsed, RUN_LIST_MAX_LIMIT);
+    }
+
+    const offsetRaw = params.get("offset");
+    let offset = 0;
+    if (offsetRaw !== null) {
+      const parsed = parseStrictInt(offsetRaw);
+      if (parsed === null || parsed < 0) {
+        const err: Err = { ok: false, errors: ["offset_invalid"] };
+        return c.json(err, 400);
+      }
+      offset = parsed;
+    }
+
+    // --- Filter params ------------------------------------------------
+    const wherePieces: string[] = [];
+    const bindings: Array<string | number> = [];
+
+    const status = params.get("status");
+    if (status !== null && status.length > 0) {
+      wherePieces.push("status = ?");
+      bindings.push(status);
+    }
+
+    const pipelineId = params.get("pipeline_id");
+    if (pipelineId !== null && pipelineId.length > 0) {
+      wherePieces.push("pipeline_id = ?");
+      bindings.push(pipelineId);
+    }
+
+    // initial_input.<field>=<value> — collected by walking every query
+    // key. Multiple entries AND-combine.
+    for (const [key, value] of params.entries()) {
+      if (!key.startsWith("initial_input.")) continue;
+      const field = key.slice("initial_input.".length);
+      if (!RUN_LIST_INITIAL_INPUT_FIELD_RE.test(field)) {
+        const err: Err = {
+          ok: false,
+          errors: [`initial_input_field_invalid:${field}`],
+        };
+        return c.json(err, 400);
+      }
+      // The field name is interpolated into the SQL string; the value
+      // stays bound. The regex above is the SQL-injection guard.
+      wherePieces.push(
+        `JSON_EXTRACT(initial_input_json, '$.${field}') = ?`,
+      );
+      bindings.push(value);
+    }
+
+    // --- Build + run query --------------------------------------------
+    const whereSql =
+      wherePieces.length > 0 ? ` WHERE ${wherePieces.join(" AND ")}` : "";
+    const sql =
+      `SELECT id, pipeline_id, status, initial_input_json, created_at,` +
+      ` webhook_status FROM runs${whereSql} ORDER BY created_at DESC,` +
+      ` id ASC LIMIT ? OFFSET ?`;
+    bindings.push(limit, offset);
+
+    interface Row {
+      readonly id: string;
+      readonly pipeline_id: string;
+      readonly status: string;
+      readonly initial_input_json: string;
+      readonly created_at: string;
+      readonly webhook_status: string | null;
+    }
+    // `prepare` is not cached because the SQL shape varies with the
+    // filter set; the prepare cost is negligible at demo scale and the
+    // alternative (cache by SQL string) adds complexity without benefit.
+    const rows = db.prepare(sql).all(...bindings) as ReadonlyArray<Row>;
+
+    const runs: RunListItem[] = rows.map((row) => ({
+      run_id: row.id,
+      pipeline_id: row.pipeline_id,
+      status: row.status,
+      initial_input: JSON.parse(row.initial_input_json) as unknown,
+      created_at: row.created_at,
+      webhook_status: row.webhook_status,
+    }));
+
+    const ok: Ok<RunListView> = { ok: true, data: { runs } };
+    return c.json(ok, 200);
   });
+}
+
+/**
+ * Strict integer parser: rejects floats, scientific notation, leading
+ * `+`, whitespace, and any string that doesn't round-trip through
+ * `String(parseInt(...))`. Returns `null` on bad input.
+ */
+function parseStrictInt(raw: string): number | null {
+  if (!/^-?\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
+  return n;
 }

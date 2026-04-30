@@ -101,7 +101,7 @@ A single shared bearer token, used by every Murmur boundary.
 Required on every request as `Authorization: Bearer <MURMUR_TOKEN>`:
 
 - Agents → Murmur (MCP transport + publisher API).
-- Publishers → Murmur (`POST /pipelines`, `POST /pipelines/{id}/runs`, `GET /runs/{id}`).
+- Publishers → Murmur (`POST /pipelines`, `POST /pipelines/{id}/runs`, `GET /runs/{id}`, `GET /runs`).
 - Murmur → publisher subcommand endpoints (proxied `task_tool` calls).
 - Murmur → publisher webhook URL.
 
@@ -437,6 +437,56 @@ Resulting `final_output`:
   "case_studies": []
 }
 ```
+
+---
+
+## 8. `GET /runs` — list runs
+
+Companion to `GET /runs/{run_id}` (DESIGN.md §3.2). Lets an agent
+discover the right `run_id` for a user's natural-language request
+(e.g. *"add Stripe to jobseek"*) without the user pasting a run id.
+
+### 8.1 Request
+
+```
+GET /runs?status=running&pipeline_id=jobseek-add-company&initial_input.company_name=Stripe&limit=10 HTTP/1.1
+Authorization: Bearer <MURMUR_TOKEN>
+```
+
+All query params are optional. Multiple filters AND-combine.
+
+| Param | Meaning |
+|---|---|
+| `status` | Exact match against `runs.status`. |
+| `pipeline_id` | Exact match against `runs.pipeline_id`. |
+| `initial_input.<field>` | Equality against `JSON_EXTRACT(initial_input_json, '$.<field>')`. `<field>` MUST match `^[A-Za-z0-9_]+$`. Repeating with different `<field>` segments AND-combines. |
+| `limit` | Integer ≥ 1. Server clamps at 100; default 25. |
+| `offset` | Integer ≥ 0; default 0. |
+
+### 8.2 Response
+
+`200 { ok: true, data: { runs: RunListItem[] } }`. Always 200 on a
+well-formed query — no matches yields `{"runs": []}` (NEVER 404).
+
+```ts
+interface RunListItem {
+  run_id: string;
+  pipeline_id: string;
+  status: string;          // e.g. "running" | "completed"
+  initial_input: unknown;  // rehydrated from initial_input_json
+  created_at: string;      // RFC 3339 UTC
+  webhook_status: string | null;  // see §6 + GET /runs/{id}
+}
+```
+
+Order: `created_at DESC, id ASC` (newest first; tie-break by id).
+
+### 8.3 Errors
+
+- 400 `{ ok: false, errors: ["limit_invalid"] }` — non-integer or `< 1` limit.
+- 400 `{ ok: false, errors: ["offset_invalid"] }` — non-integer or `< 0` offset.
+- 400 `{ ok: false, errors: ["initial_input_field_invalid:<field>"] }` — `<field>` outside `^[A-Za-z0-9_]+$`.
+- 401 — missing/bad bearer (handled by the shared auth middleware).
 
 ---
 
