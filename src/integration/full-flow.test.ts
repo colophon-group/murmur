@@ -206,8 +206,8 @@ async function startHarness(
   // gate at registration is sidestepped.
   const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO pipelines (id, publisher_id, version, def_json, created_at, updated_at)
+     VALUES (?, 'pub_demo_seed', ?, ?, ?, ?)`,
   ).run(pipelineId, 1, JSON.stringify(pipelineDef), now, now);
 
   return { db, app, mock, pipelineId, pipelineDef, webhookFirstAttempts };

@@ -141,19 +141,37 @@ VALUES (
 );
 
 -- ---------------------------------------------------------------------------
--- Add publisher_id to pipelines. The constant DEFAULT back-fills existing
--- rows to the demo seed; the FK is enforced going forward by the
--- foreign_keys=ON pragma applied on every connection in openDb.
+-- Add publisher_id to pipelines.
 --
--- SQLite limitation: ALTER TABLE ADD COLUMN with REFERENCES does not
--- retroactively validate the FK against existing rows — but the constant
--- DEFAULT we use ('pub_demo_seed') matches the row inserted above, so a
--- post-migration foreign_key_check is expected to return zero violations.
--- Tests assert this.
+-- **SQLite caveat (cost of the M1 deploy outage on first attempt):**
+-- when `foreign_keys=ON` AND any existing row exists in `pipelines`,
+-- SQLite refuses to ALTER ADD COLUMN with a `REFERENCES` clause AND a
+-- non-NULL DEFAULT in one shot — the rule is "REFERENCES added via
+-- ALTER must default to NULL". Locally with a fresh `:memory:` table
+-- (no rows) the ALTER passes; in production the row from the previous
+-- demo deploy makes it fail with `Cannot add a REFERENCES column with
+-- non-NULL default value`. See SQLite docs §"ALTER TABLE ADD COLUMN".
+--
+-- Workaround: add the column NULLable with a NULL default, then
+-- back-fill in a separate UPDATE. The FK is enforced going forward
+-- by the `foreign_keys=ON` pragma. The application layer (the INSERT
+-- in `mountPipelineRoutes`) always supplies `publisher_id` from
+-- `c.var.publisher_id`, so a NULL never appears in any post-migration
+-- write — but the schema-level NOT NULL guarantee is traded for one
+-- that lives at the application layer.
+--
+-- A future migration can rebuild the table to recover the NOT NULL
+-- guarantee (table-rebuild requires `PRAGMA foreign_keys=OFF` outside
+-- the transaction; the current migration runner wraps each file in a
+-- single BEGIN IMMEDIATE / COMMIT, so the rebuild is its own concern
+-- when a migration runner that toggles FKs lands).
 -- ---------------------------------------------------------------------------
 ALTER TABLE pipelines
-  ADD COLUMN publisher_id TEXT NOT NULL DEFAULT 'pub_demo_seed'
-    REFERENCES publishers(id);
+  ADD COLUMN publisher_id TEXT REFERENCES publishers(id);
+
+UPDATE pipelines
+   SET publisher_id = 'pub_demo_seed'
+ WHERE publisher_id IS NULL;
 
 CREATE INDEX idx_pipelines_publisher
   ON pipelines(publisher_id);

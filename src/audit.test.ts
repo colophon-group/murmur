@@ -151,8 +151,8 @@ function seed(opts: {
   };
 
   db.prepare(
-    `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
-     VALUES (?, 1, ?, ?, ?)`,
+    `INSERT INTO pipelines (id, publisher_id, version, def_json, created_at, updated_at)
+     VALUES (?, 'pub_demo_seed', 1, ?, ?, ?)`,
   ).run(PIPELINE_ID, JSON.stringify(def), NOW, NOW);
   db.prepare(
     `INSERT INTO runs (id, pipeline_id, pipeline_version, status,
@@ -426,8 +426,8 @@ describe("audit-log stress: 1000 writes don't bloat the DB", () => {
     runMigrations(db);
     try {
       db.prepare(
-        `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
-         VALUES (?, 1, '{}', ?, ?)`,
+        `INSERT INTO pipelines (id, publisher_id, version, def_json, created_at, updated_at)
+         VALUES (?, 'pub_demo_seed', 1, '{}', ?, ?)`,
       ).run(PIPELINE_ID, NOW, NOW);
       db.prepare(
         `INSERT INTO runs (id, pipeline_id, pipeline_version, status,
