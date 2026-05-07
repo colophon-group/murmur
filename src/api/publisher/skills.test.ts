@@ -355,6 +355,150 @@ describe("DELETE /skills/:name/:version", () => {
   });
 });
 
+describe("POST /skills — additional validation branches", () => {
+  it("rejects malformed JSON body with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: "{not-json",
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects body that is not an object with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: '"a string"',
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects missing version", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, version: undefined }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects malformed version", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, version: "bad version" }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects empty description", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, description: "" }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects non-object manifest", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, manifest: "not-an-object" }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects non-array files", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, files: "not-array" }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects empty files array", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, files: [] }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects more than 64 files", async () => {
+    const { app } = freshServer();
+    const lots = Array.from({ length: 65 }, (_, i) => ({
+      path: `f${i}.md`,
+      content: "x",
+    }));
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, files: lots }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects non-object file entry", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({ ...VALID_BUNDLE, files: ["not-an-object"] }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects file with non-string content", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({
+        ...VALID_BUNDLE,
+        files: [
+          ...VALID_BUNDLE.files,
+          { path: "x.md", content: 123 as unknown as string },
+        ],
+      }),
+    });
+    expect(r.status).toBe(400);
+  });
+});
+
+describe("GET /skills — auth scope", () => {
+  it("returns 401 without an Authorization header", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills");
+    expect(r.status).toBe(401);
+  });
+
+  it("returns 401 on /skills/:name without auth", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills/some-skill");
+    expect(r.status).toBe(401);
+  });
+});
+
+describe("DELETE /skills — auth scope", () => {
+  it("returns 401 without an Authorization header", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/skills/x/1.0.0", { method: "DELETE" });
+    expect(r.status).toBe(401);
+  });
+});
+
 describe("Cross-publisher isolation", () => {
   it("a publisher cannot see another publisher's skills", async () => {
     const { app, db } = freshServer();
