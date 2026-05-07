@@ -97,6 +97,8 @@ describe("pnpm migrate (end-to-end smoke)", () => {
         "publisher_tokens",
         "publishers",
         "runs",
+        "skill_files",
+        "skills",
         "subtask_instances",
         "subtask_results",
       ]);

@@ -104,6 +104,8 @@ export function createServer(options: CreateServerOptions): Hono {
     // installed below as route-level middleware.
     app.use("/publishers/me", publisherAuth(options.db));
     app.use("/publishers/me/*", publisherAuth(options.db));
+    app.use("/skills", publisherAuth(options.db));
+    app.use("/skills/*", publisherAuth(options.db));
 
     // Bootstrap: POST /publishers gated by MURMUR_BOOTSTRAP_TOKEN.
     // Path-scoped middleware via `app.use('/publishers', mw)` would

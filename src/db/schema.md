@@ -288,12 +288,57 @@ Indexes:
 
 ---
 
+---
+
+## `skills`
+
+One row per `(publisher_id, name, version)` triple. M5 Phase A (issue
+#85) — versions are immutable once published; deprecation marks a row
+without deleting.
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | `skl_<24-hex>`. |
+| `publisher_id` | `TEXT NOT NULL` | NO | FK → `publishers.id`. |
+| `name` | `TEXT NOT NULL` | NO | Kebab-case skill slug. |
+| `version` | `TEXT NOT NULL` | NO | Semver-ish; immutable once written. |
+| `description` | `TEXT NOT NULL` | NO | One-line summary. |
+| `manifest_json` | `TEXT NOT NULL` | NO | Parsed SKILL.md frontmatter — `loadable_by`, `loads_on`, `on_demand`. |
+| `deprecated_at` | `TEXT` | YES | RFC 3339 when `DELETE /skills/{name}/{version}` flips it; row + files retained. |
+| `created_at` | `TEXT NOT NULL` | NO | RFC 3339. |
+
+Indexes:
+- `idx_skills_triple` — UNIQUE on `(publisher_id, name, version)`. Re-upload returns 409.
+- `idx_skills_pub_name` — non-unique on `(publisher_id, name)`. Drives `GET /skills/{name}`.
+
+---
+
+## `skill_files`
+
+Flat-file content of a skill bundle. One row per file in the bundle.
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | `sklf_<24-hex>`. |
+| `skill_id` | `TEXT NOT NULL` | NO | FK → `skills.id`. |
+| `path` | `TEXT NOT NULL` | NO | Relative path inside the bundle (e.g. `SKILL.md`, `_examples/foo.json`). |
+| `content` | `TEXT NOT NULL` | NO | UTF-8 text. Binary files out of scope for v1. |
+| `byte_size` | `INTEGER NOT NULL` | NO | UTF-8 byte length of `content`. |
+| `created_at` | `TEXT NOT NULL` | NO | RFC 3339. |
+
+Indexes:
+- `idx_skill_files_skill_path` — UNIQUE on `(skill_id, path)`.
+- `idx_skill_files_skill` — non-unique on `skill_id`.
+
+---
+
 ## Summary
 
 Tables: `_migrations`, `pipelines`, `runs`, `subtask_instances`,
 `subtask_results`, `agent_actions`, `publishers`, `publisher_tokens`,
-`publisher_secrets`, `publisher_audit_events` (ten total — nine domain
-tables plus the migrations bookkeeping table).
+`publisher_secrets`, `publisher_audit_events`, `skills`, `skill_files`
+(twelve total — eleven domain tables plus the migrations bookkeeping
+table).
 
 Domain indexes:
 - `subtask_instances` × `claim_token` (UNIQUE, partial)
@@ -304,3 +349,7 @@ Domain indexes:
 - `publisher_tokens` × `publisher_id`
 - `publisher_secrets` × `(publisher_id, kind, created_at DESC)` partial
 - `publisher_audit_events` × `(publisher_id, ts)`
+- `skills` × `(publisher_id, name, version)` UNIQUE
+- `skills` × `(publisher_id, name)`
+- `skill_files` × `(skill_id, path)` UNIQUE
+- `skill_files` × `skill_id`
