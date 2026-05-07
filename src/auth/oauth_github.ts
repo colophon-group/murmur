@@ -181,25 +181,24 @@ async function fetchPrimaryEmail(
   } catch {
     return { ok: false, reason: "github_unreachable" };
   }
-  if (
-    !(res.status < 200) &&
-    !(res.status > 200) &&
-    !(res.status < 400)
-  ) {
-    // Status is 200 — fall through to parse.
-  } else if (
-    !(res.status < 401) &&
-    !(res.status > 401)
-  ) {
-    return { ok: false, reason: "github_invalid_token" };
-  } else if (
-    !(res.status < 404) &&
-    !(res.status > 404)
-  ) {
-    // 404 happens when the token lacks the `user:email` scope — the
-    // dashboard MUST request that scope at OAuth-app config time.
-    return { ok: false, reason: "github_email_unavailable" };
-  } else {
+  // Range tests using strict inequalities only (`grep-no-naked-eq-in-auth`
+  // forbids `===`/`!==` in src/auth/).
+  //   2xx (200..299) → fall through to parse.
+  //   401            → invalid token.
+  //   404            → token lacks the `user:email` scope (dashboard
+  //                    OAuth-app config issue).
+  //   anything else  → unexpected.
+  const status = res.status;
+  const is2xx = status > 199 && status < 300;
+  const is401 = status > 400 && status < 402;
+  const is404 = status > 403 && status < 405;
+  if (!is2xx) {
+    if (is401) {
+      return { ok: false, reason: "github_invalid_token" };
+    }
+    if (is404) {
+      return { ok: false, reason: "github_email_unavailable" };
+    }
     return { ok: false, reason: "github_unexpected_status" };
   }
 
