@@ -4,8 +4,11 @@ import { Hono } from "hono";
 import type { Err } from "@murmur/contracts-types";
 
 import { createAgentApp } from "./api/agent/index.js";
+import { mountBootstrapRoutes } from "./api/publisher/admin.js";
 import { createPublisherApp } from "./api/publisher/index.js";
 import { bearerAuth } from "./auth/index.js";
+import { bootstrapAuth } from "./auth/bootstrap_auth.js";
+import { publisherAuth } from "./auth/publisher_auth.js";
 import { log } from "./logger.js";
 import { createMcpRoute } from "./mcp/server.js";
 import { deliverWebhook } from "./webhook.js";
@@ -14,79 +17,132 @@ import { deliverWebhook } from "./webhook.js";
  * Options accepted by `createServer`.
  *
  * The factory remains pure (no env reads) — the caller is responsible for
- * loading `MURMUR_TOKEN` once at boot and passing the resulting buffer in.
+ * loading every secret once at boot and passing the resulting buffers /
+ * handles in.
  */
 export interface CreateServerOptions {
   /**
-   * The boot-loaded `MURMUR_TOKEN` as a UTF-8 buffer. Used by the bearer-auth
-   * middleware to constant-time-compare incoming tokens. See
-   * `src/auth/middleware.ts` for the comparison contract.
+   * The boot-loaded `MURMUR_TOKEN` as a UTF-8 buffer. Used by the
+   * legacy `bearerAuth` middleware that gates the agent surface
+   * (`/work`, `/mcp`) — single-bearer model preserved until M2 splits
+   * the agent plane. The publisher API is gated separately by
+   * `publisherAuth(db)`.
    *
-   * MUST be a non-empty buffer; the caller (typically `readMurmurTokenFromEnv`
-   * in `src/index.ts`) is responsible for rejecting empty/unset env values
-   * before calling `createServer`.
+   * MUST be a non-empty buffer.
    */
   token: Buffer;
   /**
-   * Optional open `better-sqlite3` handle. When supplied, both the publisher
-   * sub-app (`src/api/publisher` — `POST /pipelines`, `POST /pipelines/{id}/runs`,
-   * `GET /runs/{run_id}`) and the agent sub-app (`src/api/agent` — `GET /work/next`,
-   * `POST /work/{claim_token}/result`) are mounted on top of the bearer-auth gate.
-   * Tests that only exercise auth/health may omit it; in that case both sub-apps
-   * are absent and any request to their paths falls through to the 404 handler.
+   * Optional open `better-sqlite3` handle. When supplied, the publisher
+   * sub-apps (token-gated and bootstrap-gated) and the agent sub-app
+   * are mounted; without it, only `/health` responds.
    *
-   * The factory does NOT take ownership — callers are responsible for the
-   * connection's lifecycle. Migrations MUST have been run on the handle
-   * before `createServer` is called; both sub-apps assume the schema is
-   * already in place.
+   * Migrations + boot-seed MUST have been run on the handle before
+   * `createServer` is called.
    */
   db?: Database.Database;
+  /**
+   * Optional `MURMUR_BOOTSTRAP_TOKEN` as a UTF-8 buffer. When supplied
+   * AND `db` is supplied, mounts `POST /publishers` gated by this
+   * token. Without it, `POST /publishers` 404s and operators must seed
+   * publishers via direct DB access (or env-driven boot-seed for the
+   * demo publisher).
+   *
+   * Distinct from `token`: bootstrapping a new publisher is an
+   * out-of-band operator action; coupling it to the demo MURMUR_TOKEN
+   * would mean any leak escalates to "mint arbitrary publishers".
+   */
+  bootstrapToken?: Buffer;
 }
 
 /**
  * Build the Murmur HTTP application.
  *
  * Routes:
- *   - `GET  /health` → `200 { ok: true }` (bypasses auth — see DESIGN.md §3.6).
- *   - All other requests are gated by `bearerAuth(token)`. On auth failure
- *     the middleware returns `401 { ok: false, errors: ["unauthorized"] }`.
- *   - 404 fallback (after auth) → `404 { ok: false, errors: ["not_found"] }`.
+ *   - `GET  /health` — `200 { ok: true }` (unauthenticated).
+ *   - `POST /publishers` — gated by `bootstrapAuth(bootstrapToken)`
+ *     when supplied; mints a new publisher + initial admin token.
+ *   - `POST /pipelines`, `POST /pipelines/{id}/runs`, `GET /runs/...`,
+ *     `/publishers/me/...` — gated by `publisherAuth(db)`.
+ *   - `/work/*`, `/mcp/*` — gated by legacy `bearerAuth(token)`.
+ *   - 404 fallback returns `{ ok: false, errors: ["not_found"] }`.
  *
- * The factory is pure: it creates and returns a Hono instance with no side
- * effects (no `serve`, no `listen`, no env reads). `src/index.ts` is responsible
- * for binding it to a port. Keeping the app pure makes it trivial to exercise
- * with `app.request(...)` in unit tests without opening a real socket.
+ * **Auth zoning.** Three middleware factories run on disjoint path
+ * patterns:
+ *   - `bootstrapAuth` on `POST /publishers` (route-level middleware).
+ *   - `publisherAuth(db)` on `/pipelines*`, `/runs*`, `/publishers/me*`.
+ *   - `bearerAuth(token)` on `/work*`, `/mcp*`.
  *
- * Both error bodies are typed against `Err` from `@murmur/contracts-types` so
- * any future drift from the canonical envelope shape (per `docs/contracts.md`
- * §4) is caught at compile time rather than slipping through.
+ * Path-scoped `app.use(...)` is preferred over sub-app `use("*")` so
+ * routing prefix matches stay clean (a sub-app mounted at `/` would
+ * intercept every request before the more-specific `/work` and `/mcp`
+ * sub-apps could).
  */
 export function createServer(options: CreateServerOptions): Hono {
   const app = new Hono();
 
-  // Mount the bearer-auth middleware BEFORE any business routes. The
-  // middleware itself short-circuits on `/health` so the load balancer can
-  // hit liveness without a token — DESIGN.md §3.6 explicitly carves this out.
-  app.use("*", bearerAuth(options.token));
-
+  // Health bypasses every gate (load balancer / Cloudflare Tunnel).
   app.get("/health", (c) => c.json({ ok: true }));
 
-  // Sub-apps: registered only when a DB handle was supplied. Both inherit the
-  // bearer-auth gate installed above. Publisher at `/` (each route owns its
-  // own absolute path); agent at `/work` (DESIGN.md §3.3).
   if (options.db !== undefined) {
-    const publisher = createPublisherApp({ db: options.db });
-    app.route("/", publisher);
-    // Construct the agent sub-app once and reuse it for both the HTTP
-    // mount (`/work`) and the MCP transport (`/mcp`) — the MCP tool
-    // handlers call this exact instance via `app.request(...)`,
-    // sidestepping the network entirely (DESIGN.md §3.4 mounts both
-    // surfaces on the same port; sharing the in-process app removes a
-    // hop and a TLS round-trip).
-    // Bind the webhook delivery hook with the boot-loaded bearer. The
-    // factory is fire-and-forget per M10's "does not block submit_result
-    // response" requirement; we swallow any throw inside the closure
-    // because `deliverWebhook` already logs failures internally.
+    // Auth zoning — register middleware FIRST, then routes. Hono runs
+    // matching middleware in registration order; we rely on path
+    // specificity, not registration order, for which middleware fires
+    // on a given request.
+
+    // Agent surface: legacy single-bearer.
+    app.use("/work/*", bearerAuth(options.token));
+    app.use("/mcp/*", bearerAuth(options.token));
+
+    // Publisher API: token-DB-backed multi-tenant gate.
+    app.use("/pipelines", publisherAuth(options.db));
+    app.use("/pipelines/*", publisherAuth(options.db));
+    app.use("/runs", publisherAuth(options.db));
+    app.use("/runs/*", publisherAuth(options.db));
+    // `/publishers/me*` covers `/publishers/me`, `/publishers/me/tokens/...`,
+    // `/publishers/me/audit`. The bare `/publishers` path (POST bootstrap)
+    // is NOT covered by this middleware — bootstrap has its own gate
+    // installed below as route-level middleware.
+    app.use("/publishers/me", publisherAuth(options.db));
+    app.use("/publishers/me/*", publisherAuth(options.db));
+
+    // Bootstrap: POST /publishers gated by MURMUR_BOOTSTRAP_TOKEN.
+    // Path-scoped middleware via `app.use('/publishers', mw)` would
+    // also intercept GET /publishers/me; instead, install bootstrapAuth
+    // ONLY on POST /publishers via Hono's per-method route-level
+    // middleware. We re-build the route here rather than reusing
+    // mountBootstrapRoutes (which uses `app.post('/publishers', handler)`
+    // without auth wiring) so the auth + handler are unified at one
+    // call site.
+    if (options.bootstrapToken !== undefined) {
+      const bootstrapZone = new Hono();
+      mountBootstrapRoutes(bootstrapZone, options.db);
+      // Register `app.post('/publishers', ...)` with route-level
+      // bootstrapAuth, then defer to the bootstrapZone's handler. The
+      // simpler way: a thin pass-through that calls bootstrapZone's
+      // matching route via app.request.
+      app.post(
+        "/publishers",
+        bootstrapAuth(options.bootstrapToken),
+        async (c) => {
+          // Re-issue against the inner zone — the mounted handler does
+          // the heavy lifting (parse, validate, mint, audit).
+          const innerReq = new Request(
+            new URL("/publishers", c.req.url).toString(),
+            {
+              method: "POST",
+              headers: c.req.raw.headers,
+              body: await c.req.raw.clone().arrayBuffer(),
+            },
+          );
+          return bootstrapZone.fetch(innerReq);
+        },
+      );
+    }
+
+    // Publisher routes — pipelines, runs, /publishers/me/*.
+    app.route("/", createPublisherApp({ db: options.db }));
+
+    // Agent + MCP routes.
     const tokenForWebhook = options.token.toString("utf8");
     const dbForWebhook = options.db;
     const deliverWebhookFn = (runId: string): void => {
@@ -107,10 +163,7 @@ export function createServer(options: CreateServerOptions): Hono {
     app.route("/mcp", createMcpRoute({ agentApp: agent }));
   }
 
-  // 404 fallback. The body conforms to M0's `Err` envelope shape:
-  // `{ ok: false, errors: ["not_found"] }`. The string-token form is the
-  // canonical shape for non-validation errors per `docs/contracts.md` §4.
-  // Typed as `Err` so any drift from the envelope shape fails `tsc`.
+  // 404 fallback. The body conforms to M0's `Err` envelope shape.
   app.notFound((c) => {
     const body: Err = {
       ok: false,

@@ -12,6 +12,12 @@
  * `initial_input_json` blob, paginated by `limit`/`offset`. See the
  * companion section in `docs/contracts.md`.
  *
+ * **Multi-tenant scope (M1, issue #81).** Both routes JOIN through
+ * `runs → pipelines` and filter by `pipelines.publisher_id =
+ * c.var.publisher_id`. Cross-publisher reads return `run_not_found` /
+ * an empty list — same envelope as a missing run, no information leak.
+ * Either `admin` or `runner` token kind is accepted on both routes.
+ *
  * @see DESIGN.md §3.2 — GET /runs/{run_id}
  * @see colophon-group/murmur#76 — GET /runs (list)
  */
@@ -21,6 +27,10 @@ import type { Hono } from "hono";
 
 import type { Err, Ok } from "@murmur/contracts-types";
 
+import {
+  getPublisherId,
+  requireAnyKind,
+} from "../../auth/publisher_auth.js";
 import {
   AGENT_ACTION_PAYLOAD_CAP_BYTES,
   truncatePayload,
@@ -144,10 +154,18 @@ export const RUN_LIST_INITIAL_INPUT_FIELD_RE = /^[A-Za-z0-9_]+$/;
  * @param db the open SQLite handle.
  */
 export function mountRunRoutes(app: Hono, db: Database.Database): void {
+  // Publisher-scoped: JOIN to pipelines and filter by publisher_id from
+  // the auth context. Cross-publisher reads return run_not_found.
   const selectRun = db.prepare(
-    `SELECT id, pipeline_id, pipeline_version, status, final_output_json,
-            webhook_status
-       FROM runs WHERE id = ?`,
+    `SELECT runs.id            AS id,
+            runs.pipeline_id   AS pipeline_id,
+            runs.pipeline_version AS pipeline_version,
+            runs.status        AS status,
+            runs.final_output_json AS final_output_json,
+            runs.webhook_status AS webhook_status
+       FROM runs
+       JOIN pipelines ON pipelines.id = runs.pipeline_id
+      WHERE runs.id = ? AND pipelines.publisher_id = ?`,
   );
   // Join through subtask_instances so the audit row carries `subtask_id`
   // — agent_actions itself only knows `instance_id`. Order primarily by
@@ -166,12 +184,20 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
   mountRunListRoute(app, db);
 
   app.get("/runs/:run_id", (c) => {
+    const scopeFail = requireAnyKind(c, ["admin", "runner"]);
+    if (scopeFail !== null) return scopeFail;
+    const publisherId = getPublisherId(c);
+    if (publisherId === null) {
+      const err: Err = { ok: false, errors: ["unauthorized"] };
+      return c.json(err, 401);
+    }
+
     const runId = c.req.param("run_id");
     if (runId === undefined || runId === "") {
       const err: Err = { ok: false, errors: ["run_id_required"] };
       return c.json(err, 400);
     }
-    const row = selectRun.get(runId) as RunRow | undefined;
+    const row = selectRun.get(runId, publisherId) as RunRow | undefined;
     if (row === undefined) {
       const err: Err = { ok: false, errors: ["run_not_found"] };
       return c.json(err, 404);
@@ -252,6 +278,14 @@ export function mountRunRoutes(app: Hono, db: Database.Database): void {
  */
 export function mountRunListRoute(app: Hono, db: Database.Database): void {
   app.get("/runs", (c) => {
+    const scopeFail = requireAnyKind(c, ["admin", "runner"]);
+    if (scopeFail !== null) return scopeFail;
+    const publisherId = getPublisherId(c);
+    if (publisherId === null) {
+      const err: Err = { ok: false, errors: ["unauthorized"] };
+      return c.json(err, 401);
+    }
+
     // Hono returns query params as Record<string, string> for first-only
     // wins; that's fine for our scalar params. We re-read the URL when we
     // need to walk the full set of `initial_input.*` keys.
@@ -283,19 +317,21 @@ export function mountRunListRoute(app: Hono, db: Database.Database): void {
     }
 
     // --- Filter params ------------------------------------------------
-    const wherePieces: string[] = [];
-    const bindings: Array<string | number> = [];
+    // Always-on publisher scope is the first WHERE piece; everything
+    // else AND-combines after it.
+    const wherePieces: string[] = ["pipelines.publisher_id = ?"];
+    const bindings: Array<string | number> = [publisherId];
 
     const status = params.get("status");
     if (status !== null && status.length > 0) {
-      wherePieces.push("status = ?");
+      wherePieces.push("runs.status = ?");
       bindings.push(status);
     }
 
-    const pipelineId = params.get("pipeline_id");
-    if (pipelineId !== null && pipelineId.length > 0) {
-      wherePieces.push("pipeline_id = ?");
-      bindings.push(pipelineId);
+    const pipelineIdParam = params.get("pipeline_id");
+    if (pipelineIdParam !== null && pipelineIdParam.length > 0) {
+      wherePieces.push("runs.pipeline_id = ?");
+      bindings.push(pipelineIdParam);
     }
 
     // initial_input.<field>=<value> — collected by walking every query
@@ -313,18 +349,20 @@ export function mountRunListRoute(app: Hono, db: Database.Database): void {
       // The field name is interpolated into the SQL string; the value
       // stays bound. The regex above is the SQL-injection guard.
       wherePieces.push(
-        `JSON_EXTRACT(initial_input_json, '$.${field}') = ?`,
+        `JSON_EXTRACT(runs.initial_input_json, '$.${field}') = ?`,
       );
       bindings.push(value);
     }
 
     // --- Build + run query --------------------------------------------
-    const whereSql =
-      wherePieces.length > 0 ? ` WHERE ${wherePieces.join(" AND ")}` : "";
+    // JOIN to pipelines so the publisher_id filter applies.
+    const whereSql = ` WHERE ${wherePieces.join(" AND ")}`;
     const sql =
-      `SELECT id, pipeline_id, status, initial_input_json, created_at,` +
-      ` webhook_status FROM runs${whereSql} ORDER BY created_at DESC,` +
-      ` id ASC LIMIT ? OFFSET ?`;
+      `SELECT runs.id, runs.pipeline_id, runs.status, runs.initial_input_json,` +
+      ` runs.created_at, runs.webhook_status` +
+      ` FROM runs JOIN pipelines ON pipelines.id = runs.pipeline_id` +
+      `${whereSql} ORDER BY runs.created_at DESC,` +
+      ` runs.id ASC LIMIT ? OFFSET ?`;
     bindings.push(limit, offset);
 
     interface Row {

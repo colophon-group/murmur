@@ -37,6 +37,8 @@ import {
 import { createAgentApp } from "../api/agent/index.js";
 import { createPublisherApp } from "../api/publisher/index.js";
 import { bearerAuth } from "../auth/index.js";
+import { publisherAuth } from "../auth/publisher_auth.js";
+import { seedDemoPublisher } from "../db/bootstrap.js";
 import { runMigrations } from "../db/migrate.js";
 import { closeAllPools } from "../dispatch/task_tool.js";
 import { createMcpRoute } from "../mcp/server.js";
@@ -103,9 +105,27 @@ function buildHarnessApp(
   token: Buffer,
   webhookFirstAttempts: Promise<void>[],
 ): Hono {
+  // Mirror the M1 zoned auth structure from `src/server.ts`:
+  //   - publisher API → publisherAuth(db)
+  //   - agent surface (/work, /mcp) → bearerAuth(token)
+  //   - /health → unauthenticated
+  // The integration test's setHarness() seeds the demo publisher with
+  // `MURMUR_TOKEN: TEST_TOKEN` so the bearer carried by the test is
+  // valid as both admin and runner against the demo publisher.
   const app = new Hono();
-  app.use("*", bearerAuth(token));
   app.get("/health", (c) => c.json({ ok: true }));
+
+  // Publisher API zone.
+  app.use("/pipelines", publisherAuth(db));
+  app.use("/pipelines/*", publisherAuth(db));
+  app.use("/runs", publisherAuth(db));
+  app.use("/runs/*", publisherAuth(db));
+  app.use("/publishers/me", publisherAuth(db));
+  app.use("/publishers/me/*", publisherAuth(db));
+
+  // Agent surface + MCP zone.
+  app.use("/work/*", bearerAuth(token));
+  app.use("/mcp/*", bearerAuth(token));
 
   const publisher = createPublisherApp({ db });
   app.route("/", publisher);
@@ -152,6 +172,12 @@ async function startHarness(
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
   runMigrations(db);
+  // Seed the demo publisher with the test bearer (M1, issue #81) so
+  // the publisher API accepts the integration test's MURMUR_TOKEN as
+  // both admin and runner. Also seeds subcommand_bearer = TEST_TOKEN
+  // so the dispatch path forwards the same value the mock-jobseek
+  // captures (test asserts the bearer that arrives matches MURMUR_TOKEN).
+  seedDemoPublisher(db, { MURMUR_TOKEN: TEST_TOKEN });
 
   const webhookFirstAttempts: Promise<void>[] = [];
   const app = buildHarnessApp(db, TEST_TOKEN_BUF, webhookFirstAttempts);

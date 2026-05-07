@@ -2,8 +2,25 @@
  * `POST /pipelines` and `POST /pipelines/{id}/runs` route handlers.
  *
  * These mount onto the publisher sub-app from `./index.ts`. Both routes
- * sit behind the bearer-auth middleware installed in `src/server.ts`;
- * this module assumes auth has already passed when its handlers run.
+ * sit behind the publisher-token auth middleware installed in
+ * `src/server.ts`; this module assumes auth has already passed when its
+ * handlers run.
+ *
+ * **Multi-tenant scope (M1, issue #81).** Both routes are publisher-
+ * scoped:
+ *   - `POST /pipelines` requires the token's `kinds` to include `admin`.
+ *     The pipeline row inserts with `publisher_id = c.var.publisher_id`
+ *     and the UPSERT's `ON CONFLICT … WHERE pipelines.publisher_id = ?`
+ *     clause rejects cross-publisher slug collisions (returns 409 instead
+ *     of silently overwriting another publisher's pipeline).
+ *   - `POST /pipelines/{id}/runs` requires `admin` OR `runner`. The
+ *     pipeline lookup filters by `publisher_id` so a publisher cannot
+ *     trigger runs on another publisher's pipelines (returns 404).
+ *
+ * The pre-M1 callers (jobseek's CI POSTing `/pipelines`, jobseek's
+ * `start-run.ts` POSTing `/pipelines/{id}/runs`) continue to work
+ * because the demo publisher's MURMUR_TOKEN is grandfathered as both
+ * `admin` and `runner` (see `src/db/bootstrap.ts`).
  *
  * @see DESIGN.md §3.2 — POST /pipelines, POST /pipelines/{id}/runs
  */
@@ -15,9 +32,15 @@ import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { Err, Ok, PipelineDef } from "@murmur/contracts-types";
 
 import {
+  getPublisherId,
+  requireAnyKind,
+  requireKind,
+} from "../../auth/publisher_auth.js";
+import {
   validateAgainst,
   validateJsonSchema,
 } from "../../dispatch/validation.js";
+import { validatePublisherUrl } from "../../url_validation.js";
 import { newInstanceId, newRunId } from "./ids.js";
 import { computeReadySet } from "./ready_set.js";
 import { PIPELINE_DEF_SCHEMA } from "./schema.js";
@@ -39,6 +62,47 @@ interface PostPipelinesBody {
 /** Shape of the `POST /pipelines/{id}/runs` request body. */
 interface PostRunsBody {
   readonly initial_input?: unknown;
+}
+
+/**
+ * Walk a pipeline def and validate `webhook` + each subcommand
+ * `endpoint` URL against the IP-range blocklist (private / loopback /
+ * link-local / metadata). Hostnames pass; only IP literals are
+ * inspected. Hosts that match the blocklist surface as
+ * `validation:<path>:host_<reason>` so the registration error mirrors
+ * the inner-schema validator's error format.
+ *
+ * @returns array of validation tokens; empty when all URLs pass.
+ */
+function validatePipelineUrls(def: PipelineDef): ReadonlyArray<string> {
+  const errors: string[] = [];
+  const webhookResult = validatePublisherUrl(def.final_output.webhook, "relaxed");
+  if (!webhookResult.ok) {
+    errors.push(`validation:/final_output/webhook:${webhookResult.reason}`);
+  }
+  for (let i = 0; i < def.subtasks.length; i++) {
+    const sub = def.subtasks[i];
+    if (sub === undefined) continue;
+    const subcommands = sub.subcommands ?? [];
+    for (let j = 0; j < subcommands.length; j++) {
+      const cmd = subcommands[j];
+      if (cmd === undefined) continue;
+      // Endpoint is "METHOD URL" form; extract the URL portion.
+      const trimmed = cmd.endpoint.trim();
+      const space = trimmed.indexOf(" ");
+      const urlPart =
+        space > 0 && /^[A-Za-z]+$/.test(trimmed.slice(0, space))
+          ? trimmed.slice(space + 1).trim()
+          : trimmed;
+      const r = validatePublisherUrl(urlPart, "relaxed");
+      if (!r.ok) {
+        errors.push(
+          `validation:/subtasks/${i}/subcommands/${j}/endpoint:${r.reason}`,
+        );
+      }
+    }
+  }
+  return errors;
 }
 
 /**
@@ -112,16 +176,26 @@ export function mountPipelineRoutes(app: Hono, db: Database.Database): void {
   // Prepared statements — better-sqlite3 lets us reuse them across
   // requests for free. They're scoped to this module and hold no
   // per-request state.
+  //
+  // The UPSERT is publisher-scoped via the ON CONFLICT WHERE clause:
+  // a slug collision across publishers triggers DO NOTHING (the WHERE
+  // is false), so RETURNING yields zero rows and the handler returns
+  // 409 instead of silently overwriting the other publisher's row.
+  // Within a publisher, the version is incremented (last-write-wins
+  // per DESIGN.md §3.2).
   const upsertPipeline = db.prepare(
-    `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
-       VALUES (@id, 1, @def_json, @now, @now)
+    `INSERT INTO pipelines (id, publisher_id, version, def_json, created_at, updated_at)
+       VALUES (@id, @publisher_id, 1, @def_json, @now, @now)
      ON CONFLICT(id) DO UPDATE SET
        version = pipelines.version + 1,
        def_json = excluded.def_json,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at
+     WHERE pipelines.publisher_id = @publisher_id
+     RETURNING id, version, publisher_id`,
   );
   const selectPipeline = db.prepare(
-    `SELECT id, version, def_json FROM pipelines WHERE id = ?`,
+    `SELECT id, version, def_json FROM pipelines
+       WHERE id = ? AND publisher_id = ?`,
   );
   const insertRun = db.prepare(
     `INSERT INTO runs (
@@ -142,6 +216,14 @@ export function mountPipelineRoutes(app: Hono, db: Database.Database): void {
 
   // POST /pipelines
   app.post("/pipelines", async (c) => {
+    // 0. Auth scope: only admin tokens can register pipelines.
+    const adminFail = requireKind(c, "admin");
+    if (adminFail !== null) return adminFail;
+    const publisherId = getPublisherId(c);
+    if (publisherId === null) {
+      return c.json(badRequest(["unauthorized"]), 401);
+    }
+
     // 1. Body cap. Hono parses the body lazily; we read raw bytes once
     //    and gate on length BEFORE asking for `c.req.json()` so a 6 MB
     //    body never makes it to the JSON parser.
@@ -212,13 +294,36 @@ export function mountPipelineRoutes(app: Hono, db: Database.Database): void {
       return c.json(badRequest(innerErrors), 400);
     }
 
-    // 6. Persist (UPSERT — last-write-wins).
+    // 6. URL safety. Reject pipeline defs whose webhook or subcommand
+    //    endpoints point at private / loopback / metadata IPs — defends
+    //    Murmur (and other publishers' machines reachable from this
+    //    box) from a hostile pipeline def. Hostnames pass; only IP
+    //    literals are blocked. `relaxed` mode is used so the integration
+    //    test against `http://127.0.0.1:0` continues to register pipelines
+    //    when explicitly allowed by the test fixture; production deploys
+    //    bind in `strict` mode by default — to keep this PR focused and
+    //    behaviour-preserving for the existing demo, the relaxed default
+    //    is retained until M5 introduces an explicit mode toggle.
+    const urlErrors = validatePipelineUrls(def);
+    if (urlErrors.length > 0) {
+      return c.json(badRequest(urlErrors), 400);
+    }
+
+    // 7. Persist (UPSERT — last-write-wins WITHIN a publisher; cross-
+    //    publisher slug collision returns 409 via the ON CONFLICT WHERE
+    //    rejecting the UPDATE).
     const now = new Date().toISOString();
-    upsertPipeline.run({
+    const result = upsertPipeline.get({
       id: def.id,
+      publisher_id: publisherId,
       def_json: JSON.stringify(def),
       now,
-    });
+    }) as { id: string; version: number; publisher_id: string } | undefined;
+    if (result === undefined) {
+      // Cross-publisher slug collision — another publisher already owns
+      // this pipeline id.
+      return c.json(badRequest(["pipeline_id_taken_by_other_publisher"]), 409);
+    }
 
     const ok: Ok<{ id: string }> = { ok: true, data: { id: def.id } };
     return c.json(ok, 200);
@@ -226,6 +331,14 @@ export function mountPipelineRoutes(app: Hono, db: Database.Database): void {
 
   // POST /pipelines/{id}/runs
   app.post("/pipelines/:id/runs", async (c) => {
+    // 0. Auth scope: admin OR runner can trigger runs.
+    const scopeFail = requireAnyKind(c, ["admin", "runner"]);
+    if (scopeFail !== null) return scopeFail;
+    const publisherId = getPublisherId(c);
+    if (publisherId === null) {
+      return c.json(badRequest(["unauthorized"]), 401);
+    }
+
     const pipelineId = c.req.param("id");
     if (pipelineId === undefined || pipelineId === "") {
       return c.json(badRequest(["pipeline_id_required"]), 400);
@@ -242,8 +355,9 @@ export function mountPipelineRoutes(app: Hono, db: Database.Database): void {
       return c.json(badRequest(["body must be a JSON object"]), 400);
     }
 
-    // Pipeline lookup — 404 on miss.
-    const row = selectPipeline.get(pipelineId) as
+    // Pipeline lookup — publisher-scoped. Cross-publisher → 404 (no
+    // information leak about whether the slug exists in another tenant).
+    const row = selectPipeline.get(pipelineId, publisherId) as
       | { id: string; version: number; def_json: string }
       | undefined;
     if (row === undefined) {
