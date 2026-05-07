@@ -277,13 +277,19 @@ These secrets are consumed by the deploy workflow built in issue `colophon-group
 **Action.**
 
 ```bash
-# From the operator's machine, with `gh` authenticated:
-gh secret set MURMUR_TOKEN            --env production --repo colophon-group/murmur --body "$(openssl rand -hex 32)"
+# From the operator's machine, with `gh` authenticated.
+# Every secret value is fed via stdin — never via `--body "..."`,
+# which would put the value on argv (visible to anyone with `ps`
+# access for the lifetime of the gh invocation, and persisted in
+# shell history when the line is recalled).
+MURMUR_TOKEN_VALUE=$(openssl rand -hex 32)
+gh secret set MURMUR_TOKEN            --env production --repo colophon-group/murmur < <(printf '%s' "$MURMUR_TOKEN_VALUE")
+unset MURMUR_TOKEN_VALUE
 gh secret set CLOUDFLARE_TUNNEL_TOKEN  --env production --repo colophon-group/murmur < <(printf '%s' "$CLOUDFLARE_TUNNEL_TOKEN_VALUE")
 gh secret set HETZNER_SSH_KEY          --env production --repo colophon-group/murmur < ~/.ssh/hetzner_deploy
 ```
 
-The `< <(printf ...)` and `< ~/.ssh/hetzner_deploy` forms avoid putting secret material on the command line (where it would land in shell history).
+The `< <(printf ...)` and `< ~/.ssh/hetzner_deploy` forms keep secret material off the command line. `--body "..."` is forbidden — `docs/cloudflare-tunnel.md` calls out the same anti-pattern, and #43 closes the gap that previously had `MURMUR_TOKEN` on argv via `--body "$(openssl rand -hex 32)"`.
 
 **Verify.**
 
