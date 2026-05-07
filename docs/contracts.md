@@ -241,9 +241,8 @@ There is no `{ "accepted": true, ... }` parallel envelope. The
 `grep:no-accepted-key` gate fails CI if `\baccepted:\s` appears in source
 or test files outside `_legacy/`. The gate covers TS/JS file extensions
 under `src/`, `packages/*/src/`, `apps/*/src/`, and the matching `test/`
-trees. (DESIGN.md §3.4 mentions `{ accepted: true | false }` for the
-old `submit_result` shape; that text is **superseded by this contract**
-and will be reconciled when DESIGN.md is next revised.)
+trees. (DESIGN.md §3.4 was reconciled in #40 — the `submit_result`
+description there now points at this section as authoritative.)
 
 ---
 

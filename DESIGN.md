@@ -298,7 +298,7 @@ No retries on schema-validation failure for MVP — the run fails.
 Three static tools, fixed for the lifetime of the connection:
 
 - `pull_task({ run_id?: string })` → `{ instructions, input, output_schema, claim }` or `null`. `run_id` is optional; when supplied, the claim is restricted to ready subtasks of that run (issue #75 — drives a single run end-to-end without picking up unrelated queued work). Forwards to `GET /work/next?run_id=…`.
-- `submit_result(claim, result, notes?)` → `{ accepted: true } | { accepted: false, errors: [...] }`. `notes` is an optional free-text reflection persisted in the audit log alongside the structured `result`.
+- `submit_result(claim, result, notes?)` → the canonical response envelope `{ ok, errors?, data? }` per `docs/contracts.md` §4. Validation failures use the `validation:<path>:<message>` token form per §4.4. `notes` is an optional free-text reflection persisted in the audit log alongside the structured `result`. (The legacy `{ accepted: true | false, errors }` shape this section described pre-#38 has been retired — every agent endpoint uses the single envelope; `grep:no-accepted-key` enforces the absence in CI.)
 - `task_tool(subcommand: string, claim: string, args?: object)` → `string | object` — universal dispatcher. Invokes a publisher-declared subcommand for a claim (see §3.1). `claim` is required (no session-based fallback in MVP). Static description (visible to the host's tool catalog):
 
   > *Invoke a subcommand for the current claim. The subtask `instructions` will tell you which subcommands to use and when; `task_tool('<name>', '<claim>', {...})` invokes one. The `claim` value is what `pull_task` returned in its `claim` field.*
