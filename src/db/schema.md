@@ -66,7 +66,7 @@ and for live subcommand-endpoint resolution (§3.3).
 | `def_json` | `TEXT NOT NULL` | NO | Validated pipeline-def document. |
 | `created_at` | `TEXT NOT NULL` | NO | First insertion. |
 | `updated_at` | `TEXT NOT NULL` | NO | Most recent upsert. |
-| `publisher_id` | `TEXT NOT NULL` | NO | FK → `publishers.id`. Added by 0002. Defaults to `pub_demo_seed` for back-filled rows. |
+| `publisher_id` | `TEXT` | YES (schema-level) | FK → `publishers.id`. Added by 0002. Back-filled to `pub_demo_seed` for existing rows. **NULL is forbidden by application invariant** — `mountPipelineRoutes` always supplies `publisher_id` from `c.var.publisher_id`. SQLite's `ALTER ADD COLUMN ... REFERENCES` with a non-NULL DEFAULT is rejected when existing rows are present (`foreign_keys=ON`); a future table-rebuild migration can lift this to schema-level NOT NULL once the migration runner supports `PRAGMA foreign_keys` toggle. |
 
 Foreign key: `publisher_id` REFERENCES `publishers(id)`.
 

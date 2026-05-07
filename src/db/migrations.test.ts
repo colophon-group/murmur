@@ -223,7 +223,11 @@ describe("runMigrations", () => {
       expect(byName.get("def_json")?.notnull).toBe(1);
       expect(byName.get("created_at")?.notnull).toBe(1);
       expect(byName.get("updated_at")?.notnull).toBe(1);
-      expect(byName.get("publisher_id")?.notnull).toBe(1);
+      // publisher_id is schema-level NULL-able for ALTER-on-existing-rows
+      // compat (SQLite forbids `ALTER ADD COLUMN ... REFERENCES` with a
+      // non-NULL DEFAULT when rows exist). NULL is ruled out by the
+      // application invariant; see schema.md.
+      expect(byName.get("publisher_id")?.notnull).toBe(0);
       expect(byName.get("publisher_id")?.type).toBe("TEXT");
     });
 

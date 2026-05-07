@@ -102,8 +102,8 @@ function seedRun(opts: SeedOptions = {}): Database.Database {
   runMigrations(db);
 
   db.prepare(
-    `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO pipelines (id, publisher_id, version, def_json, created_at, updated_at)
+     VALUES (?, 'pub_demo_seed', ?, ?, ?, ?)`,
   ).run(PIPELINE_ID, 1, JSON.stringify(PIPELINE_DEF), SEED_NOW, SEED_NOW);
 
   db.prepare(
@@ -521,8 +521,8 @@ describe("Webhook does not fire while spawned children are still pending", () =>
       },
     };
     db.prepare(
-      `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO pipelines (id, publisher_id, version, def_json, created_at, updated_at)
+       VALUES (?, 'pub_demo_seed', ?, ?, ?, ?)`,
     ).run(PIPELINE_ID, 1, JSON.stringify(def), SEED_NOW, SEED_NOW);
     db.prepare(
       `INSERT INTO runs

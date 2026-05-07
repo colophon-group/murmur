@@ -78,10 +78,15 @@ beforeEach(() => {
   runMigrations(db);
   seedDemoPublisher(db, { MURMUR_TOKEN: TEST_BEARER });
 
-  // Seed pipeline + completed run with one done subtask + result.
+  // Seed pipeline + completed run with one done subtask + result. The
+  // pipeline row must carry `publisher_id = 'pub_demo_seed'` (the seed
+  // demo publisher) — migration 0002's `ALTER ADD COLUMN` adds the
+  // column NULL-able for ALTER-on-existing-rows compat (SQLite rejects
+  // non-NULL DEFAULT with REFERENCES); INSERTs that omit `publisher_id`
+  // would store NULL and break the webhook_signing JOIN below.
   db.prepare(
-    `INSERT INTO pipelines (id, version, def_json, created_at, updated_at)
-     VALUES (?, 1, ?, ?, ?)`,
+    `INSERT INTO pipelines (id, publisher_id, version, def_json, created_at, updated_at)
+     VALUES (?, 'pub_demo_seed', 1, ?, ?, ?)`,
   ).run(PIPELINE_ID, JSON.stringify(PIPELINE_DEF), SEED_NOW, SEED_NOW);
   db.prepare(
     `INSERT INTO runs (id, pipeline_id, pipeline_version, status,
