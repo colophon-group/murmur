@@ -175,7 +175,7 @@ describe("runMigrations", () => {
     expect(firstRow?.applied_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("creates all domain tables plus _migrations (M1: nine domain tables)", () => {
+  it("creates all domain tables plus _migrations (M5: eleven domain tables)", () => {
     runMigrations(db);
     const rows = db
       .prepare(
@@ -183,9 +183,10 @@ describe("runMigrations", () => {
       )
       .all() as Array<{ name: string }>;
     const names = rows.map((r) => r.name);
-    // 0001 created the original 5 domain tables; 0002 (M1) added the
-    // four publisher / publisher_tokens / publisher_secrets /
-    // publisher_audit_events tables.
+    // 0001 — 5 original domain tables.
+    // 0002 (M1) — publishers, publisher_tokens, publisher_secrets,
+    //              publisher_audit_events.
+    // 0004 (M5) — skills, skill_files (0003 reserved for M2 in PR #89).
     expect(names).toEqual([
       "_migrations",
       "agent_actions",
@@ -195,6 +196,8 @@ describe("runMigrations", () => {
       "publisher_tokens",
       "publishers",
       "runs",
+      "skill_files",
+      "skills",
       "subtask_instances",
       "subtask_results",
     ]);

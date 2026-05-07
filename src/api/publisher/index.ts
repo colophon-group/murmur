@@ -27,6 +27,7 @@ import { Hono } from "hono";
 import { mountAdminMeRoutes } from "./admin.js";
 import { mountPipelineRoutes } from "./pipelines.js";
 import { mountRunRoutes } from "./runs.js";
+import { mountSkillRoutes } from "./skills.js";
 
 /**
  * Options accepted by {@link createPublisherApp}.
@@ -54,5 +55,6 @@ export function createPublisherApp(options: CreatePublisherAppOptions): Hono {
   mountPipelineRoutes(app, options.db);
   mountRunRoutes(app, options.db);
   mountAdminMeRoutes(app, options.db);
+  mountSkillRoutes(app, options.db);
   return app;
 }
