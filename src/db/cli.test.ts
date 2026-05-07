@@ -91,14 +91,18 @@ describe("pnpm migrate (end-to-end smoke)", () => {
       expect(names).toEqual([
         "_migrations",
         "agent_actions",
+        "human_audit",
         "pipelines",
         "publisher_audit_events",
+        "publisher_members",
         "publisher_secrets",
         "publisher_tokens",
         "publishers",
+        "refresh_tokens",
         "runs",
         "subtask_instances",
         "subtask_results",
+        "users",
       ]);
     } finally {
       db.close();

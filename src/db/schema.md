@@ -288,12 +288,106 @@ Indexes:
 
 ---
 
+---
+
+## `users`
+
+Global identity (one row per OAuth identity). Created on first sign-in;
+subsequent sign-ins update `email` / `display_name` / `avatar_url` from
+the latest OAuth claims. M2 (issue #82) adds this.
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | `usr_<24-char hex>`. |
+| `oauth_provider` | `TEXT NOT NULL` | NO | `'github'` (Phase 1) or `'google'` (Phase 2). Open enum — no CHECK. |
+| `oauth_subject` | `TEXT NOT NULL` | NO | Provider-stable subject id. GitHub returns numeric — stringified for storage. |
+| `email` | `TEXT NOT NULL` | NO | Latest verified primary email. NOT unique on its own (a user with a github + google identity can share an email). |
+| `display_name` | `TEXT NOT NULL` | NO | Latest display name (or `login` fallback for GitHub when `name` is null). |
+| `avatar_url` | `TEXT` | YES | Latest avatar URL. |
+| `disabled_at` | `TEXT` | YES | RFC 3339 when admin soft-disabled the user; `jwtAuth` 401s. |
+| `created_at` | `TEXT NOT NULL` | NO | First sign-in. |
+| `updated_at` | `TEXT NOT NULL` | NO | Most recent sign-in / metadata refresh. |
+
+Indexes:
+- `idx_users_oauth_identity` — UNIQUE on `(oauth_provider, oauth_subject)`. The canonical identity key.
+- `idx_users_email` — non-unique on `email` for operator-side lookups.
+
+---
+
+## `publisher_members`
+
+Per-publisher role grant. A user belongs to zero publishers until
+granted a role.
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | Opaque row id. |
+| `publisher_id` | `TEXT NOT NULL` | NO | FK → `publishers.id`. |
+| `user_id` | `TEXT NOT NULL` | NO | FK → `users.id`. |
+| `role` | `TEXT NOT NULL` | NO | `'admin'`, `'reviewer'`, `'viewer'` (open enum — no CHECK). |
+| `granted_by` | `TEXT` | YES | FK → `users.id` of the admin who granted; NULL for the bootstrap publisher's first admin. |
+| `granted_at` | `TEXT NOT NULL` | NO | RFC 3339. |
+| `revoked_at` | `TEXT` | YES | RFC 3339 when revoked; NULL while active. |
+
+Indexes:
+- `idx_publisher_members_active` — UNIQUE on `(publisher_id, user_id) WHERE revoked_at IS NULL`. One active grant per (publisher, user) pair.
+- `idx_publisher_members_user` — non-unique on `user_id WHERE revoked_at IS NULL`. Drives `/auth/exchange`'s memberships read.
+
+---
+
+## `refresh_tokens`
+
+Opaque tokens that swap for fresh JWTs. Hashed at rest (SHA-256 of the
+plaintext + a static pepper). Rotation is atomic — `/auth/refresh`
+revokes the presented row and issues a fresh one inside a single
+`BEGIN IMMEDIATE`.
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | Opaque row id. |
+| `user_id` | `TEXT NOT NULL` | NO | FK → `users.id`. |
+| `token_hash` | `TEXT NOT NULL` | NO | SHA-256 hex of the plaintext (RFC 4648 base64url-encoded). |
+| `issued_at` | `TEXT NOT NULL` | NO | RFC 3339. |
+| `expires_at` | `TEXT NOT NULL` | NO | RFC 3339; default 30 days post-issue. |
+| `revoked_at` | `TEXT` | YES | RFC 3339 when revoked. |
+| `user_agent` | `TEXT` | YES | For the audit trail. |
+| `ip_address` | `TEXT` | YES | For the audit trail. |
+
+Indexes:
+- `idx_refresh_tokens_active_hash` — UNIQUE on `token_hash WHERE revoked_at IS NULL`.
+- `idx_refresh_tokens_user` — non-unique on `user_id`.
+
+---
+
+## `human_audit`
+
+Append-only log of human-plane actions. M2 vocabulary documented in
+`docs/auth.md`. Retention: 1 year (M8 sweeper).
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | NO | Surrogate. |
+| `user_id` | `TEXT` | YES | FK → `users.id`. NULL for pre-user sign-in failures. |
+| `publisher_id` | `TEXT` | YES | FK → `publishers.id`. NULL for user-global actions. |
+| `action` | `TEXT NOT NULL` | NO | Free string — vocabulary in `docs/auth.md`. |
+| `payload_json` | `TEXT` | YES | Optional context object. |
+| `ip_address` | `TEXT` | YES | Caller IP from `X-Forwarded-For`. |
+| `user_agent` | `TEXT` | YES | Caller `User-Agent`. |
+| `created_at` | `TEXT NOT NULL` | NO | RFC 3339. |
+
+Indexes:
+- `idx_human_audit_user_ts` — non-unique on `(user_id, created_at)`.
+- `idx_human_audit_pub_ts` — non-unique on `(publisher_id, created_at)`.
+
+---
+
 ## Summary
 
 Tables: `_migrations`, `pipelines`, `runs`, `subtask_instances`,
 `subtask_results`, `agent_actions`, `publishers`, `publisher_tokens`,
-`publisher_secrets`, `publisher_audit_events` (ten total — nine domain
-tables plus the migrations bookkeeping table).
+`publisher_secrets`, `publisher_audit_events`, `users`,
+`publisher_members`, `refresh_tokens`, `human_audit` (fourteen total —
+thirteen domain tables plus the migrations bookkeeping table).
 
 Domain indexes:
 - `subtask_instances` × `claim_token` (UNIQUE, partial)
@@ -304,3 +398,11 @@ Domain indexes:
 - `publisher_tokens` × `publisher_id`
 - `publisher_secrets` × `(publisher_id, kind, created_at DESC)` partial
 - `publisher_audit_events` × `(publisher_id, ts)`
+- `users` × `(oauth_provider, oauth_subject)` UNIQUE
+- `users` × `email`
+- `publisher_members` × `(publisher_id, user_id)` UNIQUE partial
+- `publisher_members` × `user_id` partial
+- `refresh_tokens` × `token_hash` UNIQUE partial
+- `refresh_tokens` × `user_id`
+- `human_audit` × `(user_id, created_at)`
+- `human_audit` × `(publisher_id, created_at)`

@@ -35,6 +35,23 @@ import { log } from "./logger.js";
 import { createServer } from "./server.js";
 import { ClaimSweeper } from "./sweeper.js";
 
+/**
+ * Read `MURMUR_JWT_SECRET` from the env. Optional — when unset, the
+ * human-plane `/auth/*` routes are NOT mounted (any call gets a 404).
+ * Production sets a 32-byte random secret. Generate with:
+ *
+ *   openssl rand -hex 32
+ *
+ * @returns the secret bytes, or `undefined` when unset.
+ */
+export function readJwtSecretFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): Buffer | undefined {
+  const raw = env["MURMUR_JWT_SECRET"];
+  if (!raw) return undefined;
+  return Buffer.from(raw, "utf8");
+}
+
 const MAX_TCP_PORT = 65535;
 
 /**
@@ -154,14 +171,22 @@ export function startServer(
   token: Buffer,
   db?: Database.Database,
   bootstrapToken?: Buffer,
+  jwtSecret?: Buffer,
 ): ServerHandle {
-  const app = createServer(
-    db !== undefined
-      ? bootstrapToken !== undefined
-        ? { token, db, bootstrapToken }
-        : { token, db }
-      : { token },
-  );
+  // Build options inline; `exactOptionalPropertyTypes` rejects passing
+  // `undefined` for unset optional fields, so the keys are added only
+  // when supplied.
+  const options: Parameters<typeof createServer>[0] = { token };
+  if (db !== undefined) {
+    Object.assign(options, { db });
+    if (bootstrapToken !== undefined) {
+      Object.assign(options, { bootstrapToken });
+    }
+    if (jwtSecret !== undefined) {
+      Object.assign(options, { jwtSecret });
+    }
+  }
+  const app = createServer(options);
 
   // `@hono/node-server` returns the underlying `http.Server`. We capture it
   // typed as `ServerType` (the package's exported alias) so we can call
@@ -217,6 +242,7 @@ export async function main(): Promise<ServerHandle> {
   // serving 5xxs forever.
   const env = process.env as NodeJS.ProcessEnv;
   const bootstrapToken = readBootstrapTokenFromEnv(env);
+  const jwtSecret = readJwtSecretFromEnv(env);
 
   let db: Database.Database | undefined;
   if (dbPath !== undefined) {
@@ -226,19 +252,15 @@ export async function main(): Promise<ServerHandle> {
       applied: result.applied.length,
       skipped: result.skipped.length,
     });
-    // Boot-seed the demo publisher (M1, issue #81). Idempotent —
-    // re-running with the same env is a no-op; rotation of MURMUR_TOKEN
-    // between boots revokes the stale grandfather row and inserts a
-    // fresh one. Skipped silently when MURMUR_TOKEN is unset (fresh
-    // deployment with no legacy bearer to grandfather).
     seedDemoPublisher(db, env);
   }
 
-  const handle = startServer(port, token, db, bootstrapToken);
+  const handle = startServer(port, token, db, bootstrapToken, jwtSecret);
   log.info("server.listening", {
     port,
     db: dbPath !== undefined,
     bootstrap_enabled: bootstrapToken !== undefined,
+    human_auth_enabled: jwtSecret !== undefined,
   });
   return handle;
 }
