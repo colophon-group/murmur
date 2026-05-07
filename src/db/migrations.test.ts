@@ -153,6 +153,30 @@ describe("runMigrations", () => {
     expect(second.skipped).toEqual([...first.applied]);
   });
 
+  it("re-checks _migrations under the BEGIN IMMEDIATE lock (#88 race fix)", () => {
+    // Simulates the deploy.sh / container-startup race documented in
+    // #88. Pre-fix, callers that both pre-read `_migrations=[1]` and
+    // entered the apply loop would both try to apply 0002 → the
+    // loser's `db.exec(m.sql)` would hit "table publishers already
+    // exists" and crash the container.
+    //
+    // Two true processes can't share a `:memory:` DB (each is
+    // private). We simulate the race shape: caller A applies, caller
+    // B then runs with an EXPLICITLY-SUPPLIED migration set (defeating
+    // any caller-side caching of "already applied"). A pre-fix runner
+    // that snapshotted appliedVersions outside the per-migration
+    // transaction would still attempt to re-apply 0002 here. Post-fix
+    // the per-migration check inside BEGIN IMMEDIATE sees the
+    // freshly-committed row and skips cleanly.
+    const initial = runMigrations(db);
+    expect(initial.applied.length).toBeGreaterThanOrEqual(1);
+
+    const explicitSet = loadMigrations(DEFAULT_MIGRATIONS_DIR);
+    const second = runMigrations(db, explicitSet);
+    expect(second.applied).toEqual([]);
+    expect(second.skipped).toEqual(explicitSet.map((m) => m.version));
+  });
+
   it("creates the _migrations table and records applied versions", () => {
     runMigrations(db);
     const cols = tableColumns(db, "_migrations");
