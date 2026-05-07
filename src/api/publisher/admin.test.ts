@@ -241,6 +241,172 @@ describe("POST /publishers/me/tokens/:kind/rotate", () => {
   });
 });
 
+describe("POST /publishers — additional input validation", () => {
+  it("rejects body that is not a JSON object with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/publishers", {
+      method: "POST",
+      headers: { ...BOOTSTRAP_HEADERS, "Content-Type": "application/json" },
+      body: '"a-string-not-an-object"',
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects malformed JSON with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/publishers", {
+      method: "POST",
+      headers: { ...BOOTSTRAP_HEADERS, "Content-Type": "application/json" },
+      body: "{not json",
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects empty display_name with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/publishers", {
+      method: "POST",
+      headers: { ...BOOTSTRAP_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: "valid-slug", display_name: "" }),
+    });
+    expect(r.status).toBe(400);
+  });
+});
+
+describe("PATCH /publishers/me — additional input validation", () => {
+  it("rejects malformed JSON with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/publishers/me", {
+      method: "PATCH",
+      headers: { ...ADMIN_HEADERS, "Content-Type": "application/json" },
+      body: "{not json",
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects body that is not a JSON object with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/publishers/me", {
+      method: "PATCH",
+      headers: { ...ADMIN_HEADERS, "Content-Type": "application/json" },
+      body: '"string"',
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("rejects missing display_name with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request("/publishers/me", {
+      method: "PATCH",
+      headers: { ...ADMIN_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(r.status).toBe(400);
+  });
+});
+
+describe("POST /publishers/me/tokens/:kind/rotate — error paths", () => {
+  it("rejects an unknown kind with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request(
+      "/publishers/me/tokens/wizard/rotate",
+      { method: "POST", headers: ADMIN_HEADERS },
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("rotates runner token + leaves admin grandfather row alone (rotation independence)", async () => {
+    const { app, db } = freshServer();
+    const before = db
+      .prepare(
+        `SELECT id FROM publisher_tokens
+          WHERE publisher_id = 'pub_demo_seed'
+            AND source = 'env_grandfather'
+            AND revoked_at IS NULL`,
+      )
+      .get() as { id: string };
+
+    const r = await app.request(
+      "/publishers/me/tokens/runner/rotate",
+      { method: "POST", headers: ADMIN_HEADERS },
+    );
+    expect(r.status).toBe(200);
+
+    // The grandfather row (kinds=admin+runner) is NOT revoked by a
+    // single-kind rotate — its kinds_json doesn't equal ["runner"].
+    const after = db
+      .prepare(
+        `SELECT revoked_at FROM publisher_tokens WHERE id = ?`,
+      )
+      .get(before.id) as { revoked_at: string | null };
+    expect(after.revoked_at).toBeNull();
+  });
+});
+
+describe("DELETE /publishers/me/tokens/:kind/:id — kind verification (M1 fix)", () => {
+  it("rejects DELETE /tokens/runner/<admin-only-row-id> — 404 (no kind enumeration)", async () => {
+    const { app, db } = freshServer();
+    // First mint an admin-only row.
+    const r1 = await app.request("/publishers/me/tokens/admin/rotate", {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+    });
+    const r1Body = (await r1.json()) as { data: { id: string } };
+    const adminRowId = r1Body.data.id;
+
+    // Verify it grants admin only.
+    const row = db
+      .prepare(`SELECT kinds_json FROM publisher_tokens WHERE id = ?`)
+      .get(adminRowId) as { kinds_json: string };
+    expect(row.kinds_json).toBe('["admin"]');
+
+    // Now try to revoke it via the runner kind path — must 404.
+    const r2 = await app.request(
+      `/publishers/me/tokens/runner/${adminRowId}`,
+      { method: "DELETE", headers: ADMIN_HEADERS },
+    );
+    expect(r2.status).toBe(404);
+
+    // The admin row is still active.
+    const after = db
+      .prepare(`SELECT revoked_at FROM publisher_tokens WHERE id = ?`)
+      .get(adminRowId) as { revoked_at: string | null };
+    expect(after.revoked_at).toBeNull();
+  });
+
+  it("rejects an unknown kind on DELETE with 400", async () => {
+    const { app } = freshServer();
+    const r = await app.request(
+      "/publishers/me/tokens/wizard/some-id",
+      { method: "DELETE", headers: ADMIN_HEADERS },
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("revokes a webhook_signing row by id", async () => {
+    const { app, db } = freshServer();
+    const row = db
+      .prepare(
+        `SELECT id FROM publisher_secrets
+          WHERE publisher_id = 'pub_demo_seed'
+            AND kind = 'webhook_signing'
+            AND revoked_at IS NULL`,
+      )
+      .get() as { id: string };
+
+    const r = await app.request(
+      `/publishers/me/tokens/webhook_signing/${row.id}`,
+      { method: "DELETE", headers: ADMIN_HEADERS },
+    );
+    expect(r.status).toBe(200);
+
+    const after = db
+      .prepare(`SELECT revoked_at FROM publisher_secrets WHERE id = ?`)
+      .get(row.id) as { revoked_at: string | null };
+    expect(after.revoked_at).not.toBeNull();
+  });
+});
+
 describe("DELETE /publishers/me/tokens/:kind/:id", () => {
   it("revokes the specified token row", async () => {
     const { app, db } = freshServer();
