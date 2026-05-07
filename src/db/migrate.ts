@@ -118,15 +118,25 @@ function ensureMigrationsTable(db: Database.Database): void {
   );
 }
 
-function appliedVersions(db: Database.Database): Set<number> {
-  const rows = db
-    .prepare("SELECT version FROM _migrations")
-    .all() as Array<{ version: number }>;
-  return new Set(rows.map((r) => r.version));
-}
-
 /**
  * Apply pending migrations to `db`. Creates `_migrations` if absent.
+ *
+ * **Concurrency contract (#88).** The applied-versions check happens
+ * INSIDE each migration's `BEGIN IMMEDIATE` transaction, not before
+ * the loop. Pre-fix, two processes racing `runMigrations` against the
+ * same DB file (e.g., `scripts/deploy.sh`'s `pnpm migrate` step + the
+ * container's startup `runMigrations` call) would both pre-read
+ * `_migrations` as `[1]`, both decide to apply 0002, then race for
+ * the writer lock — the loser would run `m.sql` against a DB whose
+ * schema had already been changed and fail with `table publishers
+ * already exists`. That was visible in M1's deploy: the deploy step
+ * reported `failure` even though Docker's restart policy brought up a
+ * second container that found `_migrations=[1,2]` and came up healthy.
+ *
+ * Post-fix: the per-migration `IS_APPLIED_SQL` check inside the lock
+ * sees the freshly-committed row from any racing process; the loser
+ * skips and the runner reports `skipped: [version]` cleanly. No
+ * exceptions, no deploy false-failures.
  *
  * @param db an open `better-sqlite3` connection. The runner does NOT close it.
  * @param migrations the migration set to apply. If omitted, the runner
@@ -142,7 +152,6 @@ export function runMigrations(
   const set = migrations ?? loadMigrations(DEFAULT_MIGRATIONS_DIR);
 
   ensureMigrationsTable(db);
-  const already = appliedVersions(db);
 
   const applied: number[] = [];
   const skipped: number[] = [];
@@ -150,17 +159,23 @@ export function runMigrations(
   const recordStmt = db.prepare(
     "INSERT INTO _migrations (version, applied_at) VALUES (?, ?)",
   );
+  const isAppliedStmt = db.prepare(
+    "SELECT 1 AS one FROM _migrations WHERE version = ?",
+  );
 
   for (const m of set) {
-    if (already.has(m.version)) {
-      skipped.push(m.version);
-      continue;
-    }
-    // BEGIN IMMEDIATE acquires the RESERVED lock up front, matching the
-    // semantics M5's claim CAS will rely on. Wrapping the whole file plus
-    // the bookkeeping insert keeps the migration atomic.
+    // BEGIN IMMEDIATE acquires the RESERVED lock up front. Concurrent
+    // runners block here; whichever wins re-checks `_migrations` under
+    // the lock and runs the migration if still pending; the loser
+    // re-checks, sees the freshly-committed row, and skips cleanly.
     db.exec("BEGIN IMMEDIATE");
     try {
+      const alreadyApplied = isAppliedStmt.get(m.version) !== undefined;
+      if (alreadyApplied) {
+        db.exec("COMMIT");
+        skipped.push(m.version);
+        continue;
+      }
       db.exec(m.sql);
       recordStmt.run(m.version, new Date().toISOString());
       db.exec("COMMIT");

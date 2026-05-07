@@ -153,6 +153,30 @@ describe("runMigrations", () => {
     expect(second.skipped).toEqual([...first.applied]);
   });
 
+  it("re-checks _migrations under the BEGIN IMMEDIATE lock (#88 race fix)", () => {
+    // Simulates the deploy.sh / container-startup race documented in
+    // #88. Pre-fix, callers that both pre-read `_migrations=[1]` and
+    // entered the apply loop would both try to apply 0002 → the
+    // loser's `db.exec(m.sql)` would hit "table publishers already
+    // exists" and crash the container.
+    //
+    // Two true processes can't share a `:memory:` DB (each is
+    // private). We simulate the race shape: caller A applies, caller
+    // B then runs with an EXPLICITLY-SUPPLIED migration set (defeating
+    // any caller-side caching of "already applied"). A pre-fix runner
+    // that snapshotted appliedVersions outside the per-migration
+    // transaction would still attempt to re-apply 0002 here. Post-fix
+    // the per-migration check inside BEGIN IMMEDIATE sees the
+    // freshly-committed row and skips cleanly.
+    const initial = runMigrations(db);
+    expect(initial.applied.length).toBeGreaterThanOrEqual(1);
+
+    const explicitSet = loadMigrations(DEFAULT_MIGRATIONS_DIR);
+    const second = runMigrations(db, explicitSet);
+    expect(second.applied).toEqual([]);
+    expect(second.skipped).toEqual(explicitSet.map((m) => m.version));
+  });
+
   it("creates the _migrations table and records applied versions", () => {
     runMigrations(db);
     const cols = tableColumns(db, "_migrations");
@@ -175,7 +199,7 @@ describe("runMigrations", () => {
     expect(firstRow?.applied_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("creates all domain tables plus _migrations (M1: nine domain tables)", () => {
+  it("creates all domain tables plus _migrations (M2: thirteen domain tables)", () => {
     runMigrations(db);
     const rows = db
       .prepare(
@@ -185,18 +209,23 @@ describe("runMigrations", () => {
     const names = rows.map((r) => r.name);
     // 0001 created the original 5 domain tables; 0002 (M1) added the
     // four publisher / publisher_tokens / publisher_secrets /
-    // publisher_audit_events tables.
+    // publisher_audit_events tables; 0003 (M2) adds users +
+    // publisher_members + refresh_tokens + human_audit.
     expect(names).toEqual([
       "_migrations",
       "agent_actions",
+      "human_audit",
       "pipelines",
       "publisher_audit_events",
+      "publisher_members",
       "publisher_secrets",
       "publisher_tokens",
       "publishers",
+      "refresh_tokens",
       "runs",
       "subtask_instances",
       "subtask_results",
+      "users",
     ]);
   });
 

@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import type { Err } from "@murmur/contracts-types";
 
 import { createAgentApp } from "./api/agent/index.js";
+import { createAuthApp } from "./api/auth/index.js";
 import { mountBootstrapRoutes } from "./api/publisher/admin.js";
 import { createPublisherApp } from "./api/publisher/index.js";
 import { bearerAuth } from "./auth/index.js";
@@ -52,6 +53,14 @@ export interface CreateServerOptions {
    * would mean any leak escalates to "mint arbitrary publishers".
    */
   bootstrapToken?: Buffer;
+  /**
+   * Optional `MURMUR_JWT_SECRET` as a UTF-8 buffer. When supplied AND
+   * `db` is supplied, mounts the human-plane `/auth/*` routes
+   * (`POST /auth/exchange`, `POST /auth/refresh`, `DELETE /auth/session`).
+   * Without it, those routes 404. Used by the dashboard (M4) to
+   * exchange a GitHub OAuth access_token for a Murmur session JWT.
+   */
+  jwtSecret?: Buffer;
 }
 
 /**
@@ -104,6 +113,17 @@ export function createServer(options: CreateServerOptions): Hono {
     // installed below as route-level middleware.
     app.use("/publishers/me", publisherAuth(options.db));
     app.use("/publishers/me/*", publisherAuth(options.db));
+
+    // Human-plane auth (M2, issue #82): /auth/* routes when
+    // MURMUR_JWT_SECRET is supplied. Without the secret, the routes
+    // are absent and any call gets a 404.
+    if (options.jwtSecret !== undefined) {
+      const authApp = createAuthApp({
+        db: options.db,
+        jwtSecret: options.jwtSecret,
+      });
+      app.route("/auth", authApp);
+    }
 
     // Bootstrap: POST /publishers gated by MURMUR_BOOTSTRAP_TOKEN.
     // Path-scoped middleware via `app.use('/publishers', mw)` would
