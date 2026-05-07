@@ -66,8 +66,20 @@ and for live subcommand-endpoint resolution (§3.3).
 | `def_json` | `TEXT NOT NULL` | NO | Validated pipeline-def document. |
 | `created_at` | `TEXT NOT NULL` | NO | First insertion. |
 | `updated_at` | `TEXT NOT NULL` | NO | Most recent upsert. |
+| `publisher_id` | `TEXT NOT NULL` | NO | FK → `publishers.id`. Added by 0002. Defaults to `pub_demo_seed` for back-filled rows. |
 
-No secondary indexes — primary key is the only access path for MVP.
+Foreign key: `publisher_id` REFERENCES `publishers(id)`.
+
+Indexes:
+- `idx_pipelines_publisher` — non-unique on `publisher_id`. Drives the
+  `WHERE publisher_id = ?` scope on every publisher-facing query.
+
+Pipeline IDs are globally unique for v1 (PRIMARY KEY on `id`). Per-publisher
+namespacing (composite `(publisher_id, id)`) is deferred until multiple
+non-demo publishers exist; the UPSERT in `mountPipelineRoutes` is scoped
+via `WHERE pipelines.publisher_id = ?` in its `ON CONFLICT … DO UPDATE`
+clause so cross-publisher slug collisions surface as a 409, not a silent
+overwrite.
 
 ---
 
@@ -175,13 +187,120 @@ Indexes:
 
 ---
 
+---
+
+## `publishers`
+
+One row per tenant. The publisher namespace owns pipelines, runs, audit
+events, and the four-token model that gates machine-plane access (M1,
+issue #81).
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | Opaque publisher id. The demo seed is `pub_demo_seed` (hardcoded by 0002 so the `pipelines.publisher_id` back-fill default has something to point at). |
+| `slug` | `TEXT UNIQUE NOT NULL` | NO | Kebab-case publisher slug. Operator-visible; the demo's slug is overridden at boot via `MURMUR_BOOTSTRAP_PUBLISHER_SLUG`. |
+| `display_name` | `TEXT NOT NULL` | NO | Operator-visible name. |
+| `created_at` | `TEXT NOT NULL` | NO | Row creation. |
+| `updated_at` | `TEXT NOT NULL` | NO | Most recent PATCH. |
+
+No secondary indexes; lookups are by `id` (PK) or `slug` (UNIQUE).
+
+---
+
+## `publisher_tokens`
+
+Bearer tokens the publisher presents TO Murmur (admin / runner). Stored as
+SHA-256 hex of the token bytes — high-entropy random tokens (256 bits of
+input entropy) collapse the salt argument; collision-resistant SHA-256 is
+sufficient.
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | Opaque token row id. Returned alongside the new secret on rotate so operators can later target this row for `DELETE`. |
+| `publisher_id` | `TEXT NOT NULL` | NO | FK → `publishers.id`. |
+| `kinds_json` | `TEXT NOT NULL` | NO | JSON array of grant kinds — e.g. `["admin"]`, `["runner"]`, `["admin","runner"]`. Single multi-kind row avoids the cross-publisher aggregation hazard of "two rows, same hash, different kinds". |
+| `secret_hash` | `TEXT NOT NULL` | NO | SHA-256 hex of the token bytes. |
+| `prefix` | `TEXT NOT NULL` | NO | Operator-visible prefix (last 8 chars). For display only — never used in auth comparison. |
+| `source` | `TEXT NOT NULL` | NO | Provenance: `env_grandfather` for the demo's MURMUR_TOKEN-derived row; `api` for tokens minted via `/publishers/me/tokens/*/rotate`; `bootstrap` for the first admin token created with `POST /publishers`. |
+| `created_at` | `TEXT NOT NULL` | NO | Mint timestamp. |
+| `revoked_at` | `TEXT` | YES | RFC 3339 when revoked; NULL while active. |
+
+Foreign key: `publisher_id` REFERENCES `publishers(id)`.
+
+Indexes:
+- `idx_publisher_tokens_active_hash` — UNIQUE on `secret_hash`, partial:
+  `WHERE revoked_at IS NULL`. The auth middleware joins on this index;
+  the partial predicate admits historical revocations whose hash happens
+  to match a future mint.
+- `idx_publisher_tokens_pub` — non-unique on `publisher_id`.
+
+---
+
+## `publisher_secrets`
+
+Outgoing-use secrets Murmur uses to call BACK into the publisher:
+`webhook_signing` (HMAC key for signing `final_output` POSTs) and
+`subcommand_bearer` (Authorization bearer the publisher's shim verifies on
+`task_tool` proxy calls). Stored plaintext because Murmur needs the
+cleartext to sign / inject; the SQLite file is treated as a secret on par
+with `MURMUR_TOKEN` (operator runbook).
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | NO | Opaque secret row id. |
+| `publisher_id` | `TEXT NOT NULL` | NO | FK → `publishers.id`. |
+| `kind` | `TEXT NOT NULL` | NO | One of `webhook_signing`, `subcommand_bearer`. |
+| `secret_value` | `TEXT NOT NULL` | NO | Plaintext secret. Read by webhook delivery (HMAC) and `task_tool` dispatch (Authorization bearer). |
+| `prefix` | `TEXT NOT NULL` | NO | Operator-visible prefix (last 8 chars) for display. |
+| `created_at` | `TEXT NOT NULL` | NO | Mint timestamp. |
+| `revoked_at` | `TEXT` | YES | RFC 3339 when revoked; NULL while active. |
+
+Foreign key: `publisher_id` REFERENCES `publishers(id)`.
+
+Indexes:
+- `idx_publisher_secrets_active` — non-unique on
+  `(publisher_id, kind, created_at DESC) WHERE revoked_at IS NULL`.
+  Drives the "most recent active secret of this kind" lookup used by
+  webhook delivery and `task_tool` dispatch.
+
+---
+
+## `publisher_audit_events`
+
+Machine-plane admin audit log. Records token mint/rotate/revoke,
+publisher-config PATCH, and bootstrap operations.
+
+| Column | Type | NULL? | Notes |
+| --- | --- | --- | --- |
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | NO | Surrogate id for ordering. |
+| `publisher_id` | `TEXT NOT NULL` | NO | FK → `publishers.id`. |
+| `ts` | `TEXT NOT NULL` | NO | RFC 3339. |
+| `action` | `TEXT NOT NULL` | NO | Free string — convention documented in `docs/auth.md`. No CHECK constraint so future kinds add without a migration. |
+| `token_kind` | `TEXT` | YES | The token kind operated on, if applicable (e.g. `admin`, `runner`, `webhook_signing`, `subcommand_bearer`). |
+| `actor_user_id` | `TEXT` | YES | User id for human-plane actions (M2). NULL for machine-plane / system actions. |
+| `metadata_json` | `TEXT` | YES | Optional JSON blob with action-specific context. |
+
+Foreign key: `publisher_id` REFERENCES `publishers(id)`.
+
+Indexes:
+- `idx_publisher_audit_pub_ts` — non-unique on `(publisher_id, ts)`.
+  Drives `GET /publishers/me/audit` ordered traversal.
+
+---
+
 ## Summary
 
 Tables: `_migrations`, `pipelines`, `runs`, `subtask_instances`,
-`subtask_results`, `agent_actions` (six total — five domain tables
-plus the migrations bookkeeping table).
+`subtask_results`, `agent_actions`, `publishers`, `publisher_tokens`,
+`publisher_secrets`, `publisher_audit_events` (ten total — nine domain
+tables plus the migrations bookkeeping table).
 
 Domain indexes:
 - `subtask_instances` × `claim_token` (UNIQUE, partial)
 - `subtask_instances` × `(status, created_at)`
 - `agent_actions` × `(instance_id, ts)`
+- `pipelines` × `publisher_id`
+- `publisher_tokens` × `secret_hash` (UNIQUE, partial: `WHERE revoked_at IS NULL`)
+- `publisher_tokens` × `publisher_id`
+- `publisher_secrets` × `(publisher_id, kind, created_at DESC)` partial
+- `publisher_audit_events` × `(publisher_id, ts)`

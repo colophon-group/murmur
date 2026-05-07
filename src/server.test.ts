@@ -1,7 +1,10 @@
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
 import type { EnvelopeResponse } from "@murmur/contracts-types";
 
+import { seedDemoPublisher } from "./db/bootstrap.js";
+import { runMigrations } from "./db/migrate.js";
 import { createServer } from "./server.js";
 import { readMurmurTokenFromEnv, readPortFromEnv } from "./index.js";
 
@@ -19,15 +22,21 @@ describe("createServer", () => {
     expect(body).toEqual({ ok: true });
   });
 
-  it("GET /unknown returns 401 without a bearer token (auth runs first)", async () => {
+  it("GET /unknown without a db returns 404 (M1: zoned auth, no wildcard gate)", async () => {
+    // M1 (issue #81) auth restructure: with no db, no auth middleware
+    // is mounted (publisher API + agent surfaces are db-dependent).
+    // Unknown paths fall through to the 404 handler. Pre-M1 the
+    // wildcard `app.use('*', bearerAuth(...))` would have 401'd here;
+    // that's gone in favour of path-scoped middleware (`/work/*`,
+    // `/mcp/*`, `/pipelines*`, `/runs*`, `/publishers/me*`).
     const app = createServer({ token: TEST_TOKEN_BUF });
 
     const response = await app.request("/unknown");
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(404);
   });
 
-  it("GET /unknown with the correct bearer returns 404 (auth passes, route missing)", async () => {
+  it("GET /some/missing/path with the correct bearer returns 404", async () => {
     const app = createServer({ token: TEST_TOKEN_BUF });
 
     const response = await app.request("/some/missing/path", {
@@ -49,17 +58,26 @@ describe("createServer", () => {
     });
   });
 
-  it("ignores `?token=...` query strings (bearer is read from Authorization only)", async () => {
-    const app = createServer({ token: TEST_TOKEN_BUF });
+  it("ignores `?token=...` query strings on a zoned path (bearer is read from Authorization only)", async () => {
+    // Pick a path that IS in an auth-gated zone so the auth check
+    // actually fires. /pipelines is publisherAuth-zoned when db is
+    // supplied. A `?token=…` query param is never consulted by the
+    // auth middleware; only the Authorization header is.
+    const db = new Database(":memory:");
+    runMigrations(db);
+    seedDemoPublisher(db, { MURMUR_TOKEN: TEST_TOKEN });
+    const app = createServer({ token: TEST_TOKEN_BUF, db });
 
     const response = await app.request(
-      `/some/missing/path?token=${TEST_TOKEN}`,
+      `/pipelines?token=${TEST_TOKEN}`,
+      { method: "POST" },
     );
 
     // No Authorization header → 401 even though the token appears in the URL.
     const body = (await response.json()) as EnvelopeResponse<unknown>;
     expect(response.status).toBe(401);
     expect(body).toEqual({ ok: false, errors: ["unauthorized"] });
+    db.close();
   });
 });
 

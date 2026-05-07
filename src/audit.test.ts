@@ -49,8 +49,10 @@ import {
   truncateForAudit,
 } from "./dispatch/audit.js";
 import { closeAllPools, dispatchTaskTool } from "./dispatch/task_tool.js";
+import { seedDemoPublisher } from "./db/bootstrap.js";
 import { openDb } from "./db/index.js";
 import { runMigrations } from "./db/migrate.js";
+import { publisherAuth } from "./auth/publisher_auth.js";
 
 /* -------------------------------------------------------------------- */
 /* Stub publisher                                                        */
@@ -390,9 +392,17 @@ describe("GET /runs/{run_id} ordering", () => {
       insert.run(INSTANCE_ID, "2026-04-29T12:00:01.000Z", "k_first");
       insert.run(INSTANCE_ID, "2026-04-29T12:00:02.000Z", "k_second");
 
+      // Seed a publisher token so the publisher-scoped /runs/:run_id
+      // route accepts the bearer.
+      const TEST_BEARER = "test-bearer-audit";
+      seedDemoPublisher(db, { MURMUR_TOKEN: TEST_BEARER });
+
       const app = new Hono();
+      app.use("*", publisherAuth(db));
       mountRunRoutes(app, db);
-      const response = await app.request(`/runs/${RUN_ID}`);
+      const response = await app.request(`/runs/${RUN_ID}`, {
+        headers: { Authorization: `Bearer ${TEST_BEARER}` },
+      });
       const body = (await response.json()) as EnvelopeResponse<{
         agent_actions: ReadonlyArray<{ kind: string; ts: string }>;
       }>;

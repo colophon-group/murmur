@@ -175,7 +175,7 @@ describe("runMigrations", () => {
     expect(firstRow?.applied_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("creates all 5 domain tables plus _migrations", () => {
+  it("creates all domain tables plus _migrations (M1: nine domain tables)", () => {
     runMigrations(db);
     const rows = db
       .prepare(
@@ -183,10 +183,17 @@ describe("runMigrations", () => {
       )
       .all() as Array<{ name: string }>;
     const names = rows.map((r) => r.name);
+    // 0001 created the original 5 domain tables; 0002 (M1) added the
+    // four publisher / publisher_tokens / publisher_secrets /
+    // publisher_audit_events tables.
     expect(names).toEqual([
       "_migrations",
       "agent_actions",
       "pipelines",
+      "publisher_audit_events",
+      "publisher_secrets",
+      "publisher_tokens",
+      "publishers",
       "runs",
       "subtask_instances",
       "subtask_results",
@@ -198,13 +205,14 @@ describe("runMigrations", () => {
       runMigrations(db);
     });
 
-    it("pipelines has the documented columns", () => {
+    it("pipelines has the documented columns (M1: + publisher_id)", () => {
       const cols = tableColumns(db, "pipelines");
       const byName = new Map(cols.map((c) => [c.name, c]));
       expect([...byName.keys()].sort()).toEqual([
         "created_at",
         "def_json",
         "id",
+        "publisher_id",
         "updated_at",
         "version",
       ]);
@@ -215,6 +223,8 @@ describe("runMigrations", () => {
       expect(byName.get("def_json")?.notnull).toBe(1);
       expect(byName.get("created_at")?.notnull).toBe(1);
       expect(byName.get("updated_at")?.notnull).toBe(1);
+      expect(byName.get("publisher_id")?.notnull).toBe(1);
+      expect(byName.get("publisher_id")?.type).toBe("TEXT");
     });
 
     it("runs has the documented columns", () => {

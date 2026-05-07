@@ -27,6 +27,8 @@ import { serve, type ServerType } from "@hono/node-server";
 
 import type Database from "better-sqlite3";
 
+import { readBootstrapTokenFromEnv } from "./auth/bootstrap_auth.js";
+import { seedDemoPublisher } from "./db/bootstrap.js";
 import { openDb } from "./db/index.js";
 import { runMigrations } from "./db/migrate.js";
 import { log } from "./logger.js";
@@ -151,8 +153,15 @@ export function startServer(
   port: number,
   token: Buffer,
   db?: Database.Database,
+  bootstrapToken?: Buffer,
 ): ServerHandle {
-  const app = createServer(db !== undefined ? { token, db } : { token });
+  const app = createServer(
+    db !== undefined
+      ? bootstrapToken !== undefined
+        ? { token, db, bootstrapToken }
+        : { token, db }
+      : { token },
+  );
 
   // `@hono/node-server` returns the underlying `http.Server`. We capture it
   // typed as `ServerType` (the package's exported alias) so we can call
@@ -206,6 +215,9 @@ export async function main(): Promise<ServerHandle> {
   // means the server only starts answering requests once the DB is ready;
   // `process.exit(1)` on any failure keeps a half-migrated boot from
   // serving 5xxs forever.
+  const env = process.env as NodeJS.ProcessEnv;
+  const bootstrapToken = readBootstrapTokenFromEnv(env);
+
   let db: Database.Database | undefined;
   if (dbPath !== undefined) {
     db = openDb(dbPath);
@@ -214,10 +226,20 @@ export async function main(): Promise<ServerHandle> {
       applied: result.applied.length,
       skipped: result.skipped.length,
     });
+    // Boot-seed the demo publisher (M1, issue #81). Idempotent —
+    // re-running with the same env is a no-op; rotation of MURMUR_TOKEN
+    // between boots revokes the stale grandfather row and inserts a
+    // fresh one. Skipped silently when MURMUR_TOKEN is unset (fresh
+    // deployment with no legacy bearer to grandfather).
+    seedDemoPublisher(db, env);
   }
 
-  const handle = startServer(port, token, db);
-  log.info("server.listening", { port, db: dbPath !== undefined });
+  const handle = startServer(port, token, db, bootstrapToken);
+  log.info("server.listening", {
+    port,
+    db: dbPath !== undefined,
+    bootstrap_enabled: bootstrapToken !== undefined,
+  });
   return handle;
 }
 

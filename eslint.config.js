@@ -22,6 +22,9 @@ export default tseslint.config(
       "coverage/**",
       "packages/**/dist/**",
       "**/*.d.ts",
+      // Other Claude Code agent worktrees on disk — their `src/` trees
+      // shouldn't pollute the active branch's lint set.
+      ".claude/worktrees/**",
     ],
   },
   ...tseslint.configs.recommended,

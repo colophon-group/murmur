@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import type { EnvelopeResponse } from "@murmur/contracts-types";
 
+import { seedDemoPublisher } from "../../db/bootstrap.js";
 import { runMigrations } from "../../db/migrate.js";
 import { createServer } from "../../server.js";
 import type { RunListItem, RunListView } from "./runs.js";
@@ -73,6 +74,9 @@ function freshServer(): {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   runMigrations(db);
+  // Grandfather TEST_TOKEN as the demo publisher's admin+runner so
+  // POST /pipelines + POST /pipelines/{id}/runs accept the bearer.
+  seedDemoPublisher(db, { MURMUR_TOKEN: TEST_TOKEN });
   const app = createServer({ token: TEST_TOKEN_BUF, db });
   return { db, app };
 }

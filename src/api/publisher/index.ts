@@ -1,15 +1,20 @@
 /**
- * Publisher sub-app — three publisher-facing endpoints.
+ * Publisher sub-app — publisher-facing endpoints (machine plane).
  *
- * Routes (DESIGN.md §3.2):
- *   - `POST /pipelines`               — register/upsert a pipeline def.
- *   - `POST /pipelines/{id}/runs`     — start a run.
- *   - `GET  /runs/{run_id}`           — poll run state + audit log.
+ * Routes:
+ *   - `POST /pipelines`                             — register/upsert pipeline (admin).
+ *   - `POST /pipelines/{id}/runs`                   — start a run (admin OR runner).
+ *   - `GET  /runs/{run_id}`                         — poll run state (admin OR runner).
+ *   - `GET  /runs`                                  — list runs (admin OR runner).
+ *   - `GET  /publishers/me`                         — read publisher metadata (any).
+ *   - `PATCH /publishers/me`                        — update display_name (admin).
+ *   - `POST /publishers/me/tokens/:kind/rotate`     — mint new + revoke old (admin).
+ *   - `DELETE /publishers/me/tokens/:kind/:id`      — revoke specific row (admin).
+ *   - `GET  /publishers/me/audit`                   — read audit events (admin).
  *
- * The sub-app is mounted by `src/server.ts`. All three routes inherit
- * the bearer-auth middleware installed at the root of the main app
- * (`/health` is the only carve-out). This module's factory does NOT
- * install auth itself — composing auth twice would be wrong.
+ * The sub-app is mounted by `src/server.ts` under the `publisherAuth(db)`
+ * middleware (M1, issue #81). Per-route scope is enforced via
+ * `requireKind` / `requireAnyKind` calls inside each handler.
  *
  * The factory takes a `db` handle by injection so the same code is
  * exercisable in tests with `:memory:` and in production with a
@@ -19,6 +24,7 @@
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 
+import { mountAdminMeRoutes } from "./admin.js";
 import { mountPipelineRoutes } from "./pipelines.js";
 import { mountRunRoutes } from "./runs.js";
 
@@ -39,13 +45,14 @@ export interface CreatePublisherAppOptions {
  * Build the publisher sub-app.
  *
  * @param options see {@link CreatePublisherAppOptions}.
- * @returns a Hono instance with the three routes registered. Mount it
- *   onto the main app with `app.route("/", publisherApp)` (the routes
+ * @returns a Hono instance with all publisher routes registered. Mount
+ *   it onto the main app with `app.route("/", publisherApp)` (the routes
  *   carry their own absolute-style paths under `/`).
  */
 export function createPublisherApp(options: CreatePublisherAppOptions): Hono {
   const app = new Hono();
   mountPipelineRoutes(app, options.db);
   mountRunRoutes(app, options.db);
+  mountAdminMeRoutes(app, options.db);
   return app;
 }

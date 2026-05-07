@@ -76,10 +76,17 @@ export interface DispatchTaskToolOptions {
   /** The agent-supplied args. Not validated by the dispatcher beyond the schema check. */
   readonly args: unknown;
   /**
-   * The `MURMUR_TOKEN` value that gates Murmur's own endpoints. Murmur
-   * forwards the SAME token to the publisher per DESIGN.md §3.6
-   * (single-bearer model for the demo). Caller MUST supply; the
-   * dispatcher does not read `process.env`.
+   * Fallback bearer when the run's publisher has no active
+   * `subcommand_bearer` row. Pre-M1 the caller passed `MURMUR_TOKEN`
+   * here (single-bearer model); post-M1 the publisher's per-tenant
+   * `subcommand_bearer` (resolved via the claim's `run → pipeline →
+   * publisher` chain) takes precedence and the dispatcher falls back to
+   * this fallback only if no active row exists. Production callers that
+   * always seed a `subcommand_bearer` for every publisher can leave this
+   * empty; tests and pre-seed deployments pass `MURMUR_TOKEN` for
+   * graceful degradation.
+   *
+   * @see src/db/bootstrap.ts — boot-time `subcommand_bearer` seed
    */
   readonly bearer: string;
   /**
@@ -225,13 +232,23 @@ export async function dispatchTaskTool(
 
   const pool = (poolFactory ?? defaultPoolFactory)(parsed.origin);
 
-  /* 5. POST with timeout + cap. */
+  /* 5. POST with timeout + cap. Prefer the publisher's own
+   *    `subcommand_bearer` (M1, issue #81) so a hostile publisher can't
+   *    learn another publisher's bearer via task_tool dispatch. Fall
+   *    back to the legacy MURMUR_TOKEN value passed via `opts.bearer`
+   *    for pre-M1 deployments where no `subcommand_bearer` row has
+   *    been seeded yet. */
+  const dispatchBearer =
+    claim.publisher_subcommand_bearer !== null
+      ? claim.publisher_subcommand_bearer
+      : bearer;
+
   const argsJson = safeStringify(args);
   const httpResult = await proxyToPublisher({
     pool,
     path: parsed.pathname,
     method: parsed.method,
-    bearer,
+    bearer: dispatchBearer,
     subcommand,
     claimToken,
     body: argsJson,
@@ -336,12 +353,27 @@ interface ResolvedClaim {
   readonly instance_id: string;
   readonly subtask_id: string;
   readonly def_json: string;
+  /**
+   * The active per-publisher `subcommand_bearer`. Resolved via
+   * `runs → pipelines → publishers → publisher_secrets` LEFT JOIN.
+   * NULL when the publisher has no active subcommand_bearer (pre-M1
+   * deployments, or operator revoked the secret without re-issuing).
+   * Caller falls back to `opts.bearer` in that case.
+   */
+  readonly publisher_subcommand_bearer: string | null;
 }
 
 const LOOKUP_CLAIM_SQL = `
   SELECT subtask_instances.id          AS instance_id,
          subtask_instances.subtask_id  AS subtask_id,
-         pipelines.def_json            AS def_json
+         pipelines.def_json            AS def_json,
+         (SELECT secret_value
+            FROM publisher_secrets
+           WHERE publisher_secrets.publisher_id = pipelines.publisher_id
+             AND publisher_secrets.kind         = 'subcommand_bearer'
+             AND publisher_secrets.revoked_at   IS NULL
+           ORDER BY publisher_secrets.created_at DESC
+           LIMIT 1)                    AS publisher_subcommand_bearer
     FROM subtask_instances
     JOIN runs      ON runs.id          = subtask_instances.run_id
     JOIN pipelines ON pipelines.id     = runs.pipeline_id
@@ -356,13 +388,19 @@ function lookupClaim(
   nowIso: string,
 ): ResolvedClaim | null {
   const row = db.prepare(LOOKUP_CLAIM_SQL).get(claimToken, nowIso) as
-    | { instance_id: string; subtask_id: string; def_json: string }
+    | {
+        instance_id: string;
+        subtask_id: string;
+        def_json: string;
+        publisher_subcommand_bearer: string | null;
+      }
     | undefined;
   if (row === undefined) return null;
   return {
     instance_id: row.instance_id,
     subtask_id: row.subtask_id,
     def_json: row.def_json,
+    publisher_subcommand_bearer: row.publisher_subcommand_bearer,
   };
 }
 

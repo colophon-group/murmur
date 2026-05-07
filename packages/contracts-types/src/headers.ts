@@ -47,6 +47,30 @@ export const X_MURMUR_CLAIM_TOKEN = "X-Murmur-Claim-Token";
 export const IDEMPOTENCY_KEY = "Idempotency-Key";
 
 /**
+ * `X-Murmur-Signature: t=<unix>,v1=<hex>` — set by Murmur on every webhook
+ * delivery (M1, issue #81). The publisher's accept handler verifies the
+ * signature against its `webhook_signing_secret`.
+ *
+ * **Wire format.** Two comma-separated key=value pairs:
+ *
+ *   - `t=<unix-seconds>` — Murmur's wall-clock at sign time. Publishers
+ *     enforce a freshness window (recommended: ≤300 s) to bound replay.
+ *   - `v1=<hex-lowercase>` — HMAC-SHA256 over the UTF-8 bytes of
+ *     `<unix-seconds>.<body>` (literal dot separator). Hex-encoded
+ *     lowercase, 64 chars.
+ *
+ * Replay protection is "valid signature" + "fresh timestamp" + "unseen
+ * `Idempotency-Key`". Publishers MUST persist applied keys for at least
+ * `freshness_window + retry_delay` (Murmur retries once after 30 s, so
+ * 6 minutes total is the minimum safe persistence).
+ *
+ * The `v1` prefix is the signature scheme version, NOT the API version.
+ * A future `v2` (e.g. KDF change, key-binding) would coexist on the same
+ * header as a second comma-separated pair.
+ */
+export const X_MURMUR_SIGNATURE = "X-Murmur-Signature";
+
+/**
  * Bundled namespace export for ergonomic consumption:
  *   `import { MurmurHeaders } from "@murmur/contracts-types";`
  *   `headers[MurmurHeaders.X_MURMUR_SUBCOMMAND] = "probe monitor";`
@@ -56,6 +80,7 @@ export const MurmurHeaders = {
   X_MURMUR_SUBCOMMAND,
   X_MURMUR_CLAIM_TOKEN,
   IDEMPOTENCY_KEY,
+  X_MURMUR_SIGNATURE,
 } as const;
 
 /**

@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import type { EnvelopeResponse } from "@murmur/contracts-types";
 
+import { seedDemoPublisher } from "../../db/bootstrap.js";
 import { runMigrations } from "../../db/migrate.js";
 import { createServer } from "../../server.js";
 
@@ -95,6 +96,10 @@ function freshServer(): {
   // resolves relative to `process.cwd()`, which under vitest is the
   // package root. That matches the directory layout in `package.json`.
   runMigrations(db);
+  // Grandfather TEST_TOKEN as the demo publisher's admin+runner token
+  // so the publisher API (POST /pipelines, /runs, etc.) accepts the
+  // legacy bearer header used by these tests (M1, issue #81).
+  seedDemoPublisher(db, { MURMUR_TOKEN: TEST_TOKEN });
   const app = createServer({ token: TEST_TOKEN_BUF, db });
   return { db, app };
 }
